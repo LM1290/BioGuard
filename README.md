@@ -1,10 +1,10 @@
 # BioGuard: Symmetric Deep Learning for Pharmacokinetic Interaction Prediction
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://lmbioguard.streamlit.app/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://bioguardlm.streamlit.app/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-**Live Inference Engine:** [https://lmbioguard.streamlit.app/](https://lmbioguard.streamlit.app/)
+**Live Inference Engine:** [https://bioguardlm.streamlit.app/](https://bioguardlm.streamlit.app/)
 
 ## Executive Summary
 
