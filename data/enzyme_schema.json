@@ -1,0 +1,16 @@
+{
+  "feature_names": [
+    "cyp3a4_sub",
+    "cyp3a4_inh",
+    "cyp3a4_ind",
+    "cyp2d6_sub",
+    "cyp2d6_inh",
+    "cyp2c9_sub",
+    "cyp2c9_inh",
+    "pgp_sub",
+    "pgp_inh",
+    "oatp1b1_sub"
+  ],
+  "vector_dim": 11,
+  "num_features": 10
+}

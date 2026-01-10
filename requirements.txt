@@ -1,0 +1,14 @@
+fastapi==0.119.1
+joblib==1.5.3
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==22.0.0
+pydantic==2.12.5
+PyTDC==1.0.0
+python-multipart==0.0.20
+rdkit==2023.9.6
+streamlit==1.52.2
+torch==2.8.0
+tqdm==4.67.1
+uvicorn==0.38.0
+scikit-learn==1.3.2

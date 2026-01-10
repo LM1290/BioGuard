@@ -1,0 +1,24 @@
+{
+  "version": "2.0-pair_disjoint",
+  "split_type": "pair_disjoint",
+  "config": {
+    "BATCH_SIZE": 128,
+    "LEARNING_RATE": 5e-05,
+    "EPOCHS": 40,
+    "PATIENCE": 8,
+    "NUM_WORKERS": 0,
+    "SEED": 42
+  },
+  "threshold": 0.4444444477558136,
+  "input_dim": 6192,
+  "best_val_loss": 0.301901199221611,
+  "enzyme_coverage": 0.0,
+  "split_info": {
+    "train_size": 88860,
+    "val_size": 12696,
+    "test_size": 83495,
+    "train_positive_rate": 0.5,
+    "val_positive_rate": 0.5,
+    "test_positive_rate": 0.15204503263668484
+  }
+}
