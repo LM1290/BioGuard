@@ -19,7 +19,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r requirements_training.txt
 
 ### Run Streamlit App
 
@@ -120,7 +120,7 @@ Results on TWOSIDES dataset (pair-disjoint split):
 - scikit-learn 1.3.2
 - Streamlit 1.52.2
 
-See `requirements.txt` for complete list.
+See `requirements_training.txt` for complete list.
 
 ## Troubleshooting
 
