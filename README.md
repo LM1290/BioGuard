@@ -1,5 +1,7 @@
 # BioGuard DDI Prediction System (Production Version)
 
+## Disclaimer: Research/educational Interaction Risk Scoring. Not for clinical decision-making.
+
 Drug-Drug Interaction (DDI) prediction using deep learning with structural molecular features.
 Interact with the model at https://lmbioguard.streamlit.app/ !
 
