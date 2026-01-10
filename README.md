@@ -3,7 +3,7 @@
 ## Disclaimer: Research/educational Interaction Risk Scoring. Not for clinical decision-making.
 
 Drug-Drug Interaction (DDI) prediction using deep learning with structural molecular features.
-Interact with the model at https://lmbioguard.streamlit.app/ !
+Interact with the model at https://bioguardlm.streamlit.app/ !
 
 ## Features
 
