@@ -303,7 +303,7 @@ if st.button("Predict Interaction", type="primary"):
                             st.write(f"- Neural network vs. Tanimoto: {diff_tanimoto:+.3f}")
                         
                         diff_logreg = nn_prob - logreg_prob
-                        st.write(f"- Neural network vs. Logistic Regression: {diff_logreg:+.3f}")
+                        st.write(f"- Neural network vs. Linear Baseline: {diff_logreg:+.3f}")
                         
                     else:
                         st.error("Prediction failed. Please check your input.")
