@@ -160,7 +160,7 @@ with st.sidebar:
     This tool predicts drug-drug interactions using:
     - **Neural Network**: Deep learning model with calibrated probabilities
     - **Tanimoto Similarity**: Structure-based baseline
-    - **Logistic Regression**: Linear model baseline
+    - **Estimated Linear**: Linear model baseline
     
     Enter two drug SMILES strings to get predictions.
     
@@ -246,7 +246,7 @@ if st.button("Predict Interaction", type="primary"):
                         "Method": [
                             "Neural Network (BioGuardNet)",
                             "Tanimoto Similarity",
-                            "Logistic Regression (estimated)"
+                            "Linear Baseline (estimated)"
                         ],
                         "Score": [
                             f"{nn_prob:.4f}" if nn_prob is not None else "Error",
