@@ -1,4 +1,4 @@
-# BioGuard: Symmetric Deep Learning for Pharmacokinetic Interaction Prediction
+# BioGuard: Symmetric Deep Learning for Drug-Drug Interaction Risk Scoring
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://bioguardlm.streamlit.app/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,7 +12,7 @@ BioGuard is a deep learning inference engine designed to predict non-linear drug
 
 ### Key Capabilities
 *   **Permutational Invariance:** Implemented a symmetric pair-encoding strategy `(A+B) ⊕ |A-B| ⊕ (A*B)` to ensure `Interaction(Drug A, Drug B) == Interaction(Drug B, Drug A)`, eliminating directional bias.
-*   **Zero Data Leakage:** Utilizes Pair-Disjoint Splitting to ensure structural motifs present in the test set are strictly unseen during training.
+*   **Zero Data Leakage:** Utilizes Pair-Disjoint Splitting to ensure drug pairs present in the test set are strictly unseen during training.
 *   **High-Sensitivity Screening:** Optimized for Recall (0.89) to function as a safety filter in early-stage discovery pipelines, prioritizing the detection of potential adverse events.
 
 ---
@@ -29,6 +29,7 @@ BioGuard is a deep learning inference engine designed to predict non-linear drug
 | Tanimoto Similarity | 0.530 | 0.169 | 0.92 |
 
 *Note: BioGuard outperforms the non-linear Random Forest baseline by >7% in ROC-AUC and demonstrates superior recall compared to linear baselines.*
+Open-World Negative Sampling: Addresses the positive-unlabeled nature of DDI datasets by treating unrecorded pairs as non-interactions, with plans to implement hard-negative mining in v2.0 to reduce false positives.
 
 ---
 
@@ -43,6 +44,8 @@ BioGuard is a deep learning inference engine designed to predict non-linear drug
 *   **Input Layer:** 6192-dim symmetric vector.
 *   **Hidden Layers:** Dense(512) → BatchNorm → ReLU → Dropout(0.3) → Dense(256) → ReLU.
 *   **Output:** Sigmoid activation with Isotonic Regression calibration for probability scoring.
+
+Note: A symmetric MLP was chosen over Graph Neural Networks (GNNs) for v1.0 to establish a high-speed inference baseline and prioritize interpretability via feature importance analysis, before migrating to computationally heavier graph topologies.
 
 ### 3. Deployment Stack
 *   **Inference:** PyTorch / FastAPI backend.
