@@ -60,6 +60,7 @@ Note: A symmetric MLP was chosen over Graph Neural Networks (GNNs) for v1.0 to e
 1.  **Hard Negative Mining:** Integrating Tanimoto-thresholded negative sampling to correct for the "soft-negative" bias inherent in random sampling.
 2.  **Enzyme Profiling:** Integration of CYP450 metabolism vectors to move beyond pure structural features and model metabolic interference directly.
 3.  **Explainability:** Implementation of Integrated Gradients to map prediction weights back to specific substructural motifs.
+4.  Current validation utilizes a Random Cold-Start split (Drug Disjoint). Future iterations will implement Butina Clustering to ensure strict Scaffold Disjointness.
 
 ---
 
