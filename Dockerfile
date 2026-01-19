@@ -1,4 +1,4 @@
-# 1. Use a specific, stable version
+# 1. Use Python 3.11 Slim
 FROM --platform=linux/amd64 python:3.11-slim
 
 # 2. Set environment variables to prevent Python from buffering logs
