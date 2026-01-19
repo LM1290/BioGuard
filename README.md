@@ -28,7 +28,7 @@ Reproducibility is critical. Run the inference engine in a fully contained envir
 docker build -t bioguard_app .
 
 # 2. Run the interactive Streamlit engine
-docker run -p 8000:8000 bioguard_app
+docker run -p 8000:8501 --rm bioguard_app
 
 App will be available at http://localhost:8000.
 ```
@@ -44,6 +44,9 @@ cd BioGuard
 
 # Install dependencies
 pip install -r requirements_training.txt
+
+# Download TWOSIDES Dataset and Validate
+python -m validate_data
 
 # Run the training or baseline tasks
 python -m bioguard.main train
