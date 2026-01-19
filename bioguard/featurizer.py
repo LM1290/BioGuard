@@ -35,7 +35,8 @@ class BioFeaturizer:
 
         self.morgan_gen = rdFingerprintGenerator.GetMorganGenerator(
             radius=2,
-            fpSize=FINGERPRINT_SIZE
+            fpSize=FINGERPRINT_SIZE,
+            includeChirality=True
         )
         self.tautomer_enumerator = rdMolStandardize.TautomerEnumerator()
 
