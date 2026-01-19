@@ -30,4 +30,4 @@ RUN mkdir -p data artifacts
 EXPOSE 8501
 
 # 7. The "Safe" Start: Validate that we have a model before launching
-CMD ["sh", "-c", "if [ ! -f artifacts/model.pth ]; then echo 'ERROR: Model weights not found in /artifacts'; exit 1; fi; streamlit run streamlit/app.py"]
+CMD ["sh", "-c", "if [ ! -f artifacts/model.pt ]; then echo 'ERROR: Model weights not found in /artifacts'; exit 1; fi; streamlit run streamlit/app.py"]
