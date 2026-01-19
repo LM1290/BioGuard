@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Python junk
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDEs
+.idea/
+.DS_Store
+
+# Data & Notebooks (The heavy stuff)
+# Keep your artifacts (weights), but don't bake raw training data into the image
+data/raw/
+*.ipynb
+.ipynb_checkpoints/
+
+# Docker
+Dockerfile
+.dockerignore
