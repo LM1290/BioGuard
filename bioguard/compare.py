@@ -417,7 +417,7 @@ def print_detailed_analysis(results):
     print("="*80)
 
 
-def main():
+def main(split_type='pair_disjoint'):
     """Main comparison function."""
 
     results = load_results()

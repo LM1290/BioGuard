@@ -9,16 +9,15 @@
     "NUM_WORKERS": 0,
     "SEED": 42
   },
-  "threshold": 0.4444444477558136,
+  "threshold": 0.4746987819671631,
   "input_dim": 6192,
-  "best_val_loss": 0.301901199221611,
-  "enzyme_coverage": 0.0,
+  "best_val_loss": 0.30061148196458815,
   "split_info": {
     "train_size": 88860,
     "val_size": 12696,
-    "test_size": 83495,
+    "test_size": 83494,
     "train_positive_rate": 0.5,
     "val_positive_rate": 0.5,
-    "test_positive_rate": 0.15204503263668484
+    "test_positive_rate": 0.1520468536661317
   }
 }

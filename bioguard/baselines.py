@@ -31,26 +31,46 @@ import warnings
 from .data_loader import load_twosides_data
 from .train import get_pair_disjoint_split
 from .featurizer import BioFeaturizer
+from rdkit import RDLogger
+from rdkit.Chem.MolStandardize import rdMolStandardize
+RDLogger.DisableLog('rdApp.*')
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'artifacts')
 BASELINE_RESULTS = os.path.join(ARTIFACT_DIR, 'baseline_results.json')
 
 
 def compute_tanimoto_similarity(smiles_a, smiles_b):
-    """
-    Compute Tanimoto similarity between two SMILES strings.
-    Returns similarity in [0, 1] or None if invalid.
-    """
     try:
         mol_a = Chem.MolFromSmiles(smiles_a)
         mol_b = Chem.MolFromSmiles(smiles_b)
-        
+
         if mol_a is None or mol_b is None:
             return None
-        
-        fp_a = AllChem.GetMorganFingerprintAsBitVect(mol_a, 2, nBits=1024)
-        fp_b = AllChem.GetMorganFingerprintAsBitVect(mol_b, 2, nBits=1024)
-        
+
+        # Standardize using a localized enumerator with caps
+        te = rdMolStandardize.TautomerEnumerator()
+        te.SetMaxTautomers(20)
+        te.SetMaxTransforms(20)
+
+        def clean(m):
+            try:
+                # Salt strip then try tautomer canonicalization
+                m = rdMolStandardize.ChargeParent(m)
+                try:
+                    m = te.Canonicalize(m)
+                except:
+                    pass
+                return m
+            except:
+                return m
+
+        mol_a = clean(mol_a)
+        mol_b = clean(mol_b)
+
+        # FIX: Change nBits to 2048 to match the BioFeaturizer
+        fp_a = AllChem.GetMorganFingerprintAsBitVect(mol_a, 2, nBits=2048)
+        fp_b = AllChem.GetMorganFingerprintAsBitVect(mol_b, 2, nBits=2048)
+
         return DataStructs.TanimotoSimilarity(fp_a, fp_b)
     except:
         return None

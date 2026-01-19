@@ -12,26 +12,69 @@ import warnings
 from tdc.multi_pred import DDI
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
+from rdkit.Chem.MolStandardize import rdMolStandardize
 from joblib import Parallel, delayed
 from sklearn.model_selection import train_test_split
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
-CACHE_VERSION = "v9_global_negative_tracking"
+CACHE_VERSION = "v10_global_negative_tracking"
 PROCESSED_FILE = os.path.join(CACHE_DIR, f'twosides_processed_{CACHE_VERSION}.parquet')
 
 
 def _is_valid_smiles(smiles):
-    """Validate SMILES string using RDKit."""
+    """Validate and standardize SMILES with strict performance limits."""
     if not smiles or pd.isna(smiles):
-        return False
-    return Chem.MolFromSmiles(smiles) is not None
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        try:
+            # 1. Robust Salt Stripping
+            # ChargeParent removes salts and ions; it rarely fails.
+            clean_mol = rdMolStandardize.ChargeParent(mol)
+
+            # 2. Safe Tautomer Enumeration
+            # Set strict limits to avoid "Max transforms reached" errors.
+            te = rdMolStandardize.TautomerEnumerator()
+            te.SetMaxTautomers(20)
+            te.SetMaxTransforms(20)
+
+            try:
+                # Attempt to find the canonical tautomer
+                clean_mol = te.Canonicalize(clean_mol)
+            except:
+                # FALLBACK: If tautomers fail, we keep the salt-stripped molecule
+                # rather than returning None and deleting the data.
+                pass
+
+            return Chem.MolToSmiles(clean_mol)
+        except Exception:
+            # Only return None if the molecule is fundamentally unreadable
+            return None
+    return None
 
 
 def _get_fp(smiles):
-    """Generate Morgan fingerprint for similarity calculations."""
+    """Generate Morgan fingerprint with safety-first standardization."""
     mol = Chem.MolFromSmiles(smiles)
     if mol:
-        return AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
+        try:
+            # 1. Always strip salts first
+            clean_mol = rdMolStandardize.ChargeParent(mol)
+
+            # 2. Setup enumerator with performance caps
+            te = rdMolStandardize.TautomerEnumerator()
+            te.SetMaxTautomers(20)
+            te.SetMaxTransforms(20)
+
+            try:
+                # 3. Try tautomer fixing
+                clean_mol = te.Canonicalize(clean_mol)
+            except:
+                pass
+
+            return AllChem.GetMorganFingerprintAsBitVect(clean_mol, 2, nBits=1024)
+        except:
+            return None
     return None
 
 
@@ -81,21 +124,24 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
         'Drug1': 'smiles_a', 'Drug2': 'smiles_b'
     })
 
-    # Validate SMILES in parallel
-    print("Validating SMILES structures...")
+    # Validate and standardize SMILES in parallel
+    print("Standardizing SMILES structures...")
     unique_smiles = pd.concat([df_pos['smiles_a'], df_pos['smiles_b']]).unique()
+
+    # results now contains clean SMILES strings or None
     results = Parallel(n_jobs=-1)(delayed(_is_valid_smiles)(s) for s in unique_smiles)
-    valid_map = dict(zip(unique_smiles, results))
+    smiles_map = dict(zip(unique_smiles, results))
 
-    df_pos['valid_a'] = df_pos['smiles_a'].map(valid_map)
-    df_pos['valid_b'] = df_pos['smiles_b'].map(valid_map)
-    
-    invalid_count = (~(df_pos['valid_a'] & df_pos['valid_b'])).sum()
+    # Apply the clean SMILES to the dataframe
+    df_pos['smiles_a'] = df_pos['smiles_a'].map(smiles_map)
+    df_pos['smiles_b'] = df_pos['smiles_b'].map(smiles_map)
+
+    # Drop rows where standardization failed
+    invalid_count = df_pos[['smiles_a', 'smiles_b']].isna().any(axis=1).sum()
     if invalid_count > 0:
-        print(f"Removed {invalid_count} pairs with invalid SMILES")
-    
-    df_pos = df_pos[df_pos['valid_a'] & df_pos['valid_b']].drop(columns=['valid_a', 'valid_b'])
+        print(f"Removed {invalid_count} pairs with invalid or unstandardizable SMILES")
 
+    df_pos = df_pos.dropna(subset=['smiles_a', 'smiles_b'])
     # Canonicalize pairs
     print("Canonicalizing drug pairs...")
     original_count = len(df_pos)

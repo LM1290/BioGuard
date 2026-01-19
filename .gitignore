@@ -1,0 +1,22 @@
+# Python & OS
+__pycache__/
+.DS_Store
+.venv/
+.idea/
+
+# Raw Data
+data/
+*.parquet
+*.csv
+
+# Visualizations & Results
+artifacts/*.png
+artifacts/*.json
+artifacts/*.pdf
+
+# Keep the actual model!
+# We ignore the folder, then specifically allow the model files
+!artifacts/
+!artifacts/*.pt
+!artifacts/*.joblib
+

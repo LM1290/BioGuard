@@ -173,7 +173,7 @@ def run_training(split_type='pair_disjoint'):
     
     set_seed(CONFIG['SEED'])
     
-    artifact_dir = os.path.join(ARTIFACT_DIR, split_type)
+    artifact_dir = ARTIFACT_DIR
     os.makedirs(artifact_dir, exist_ok=True)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -333,4 +333,4 @@ def run_training(split_type='pair_disjoint'):
     print(f"  - model.pt")
     print(f"  - calibrator.joblib")
     print(f"  - metadata.json")
-    print(f"\nNext: python -m bioguard.main eval --split-type {split_type}")
+    print(f"\nNext: python -m bioguard.main eval")
