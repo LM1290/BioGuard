@@ -16,6 +16,38 @@ BioGuard is a deep learning inference engine designed to predict non-linear drug
 *   **High-Sensitivity Screening:** Optimized for Recall (0.89) to function as a safety filter in early-stage discovery pipelines, prioritizing the detection of potential adverse events.
 
 ---
+## Setup & Installation
+
+BioGuard can be run either via Docker (recommended for quick evaluation) or as a local Python installation (recommended for research and development).
+
+### Option 1: Docker (Recommended)
+Reproducibility is critical. Run the inference engine in a fully contained environment to ensure the "Safety-First" standardization performs identically across any system.
+
+```bash
+# 1. Build the image
+docker build -t bioguard_app .
+
+# 2. Run the interactive Streamlit engine
+docker run -p 8000:8000 bioguard_app
+
+App will be available at http://localhost:8000.
+```
+Option 2: Local Development
+
+For developers wishing to reproduce the training loop or modify the model architecture.
+
+```bash
+
+# Clone and enter the repo
+git clone [https://github.com/LM1290/BioGuard.git](https://github.com/LM1290/BioGuard.git)
+cd BioGuard
+
+# Install dependencies
+pip install -r requirements_training.txt
+
+# Run the training or baseline tasks
+python -m bioguard.main train
+```
 
 ## Performance Benchmarks
 
@@ -63,27 +95,6 @@ Note: A symmetric MLP was chosen over Graph Neural Networks (GNNs) for v1.0 to e
 4.  Current validation utilizes a Random Cold-Start split (Drug Disjoint). Future iterations will implement Butina Clustering to ensure strict Scaffold Disjointness.
 
 ---
-
-## Quick Start & Installation
-
-For developers wishing to reproduce the training loop or run the CLI.
-
-### Environment Setup
-```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies (Order matters for PyTDC)
-pip install -r requirements_training.txt
-# Validate Data Pipeline
-python -m validate_data
-
-# Train model from scratch
-python -m bioguard.main train
-
-# Run baseline comparisons
-python -m bioguard.main baselines
 
 ```
 ## Citation & Contact
