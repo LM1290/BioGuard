@@ -1,5 +1,5 @@
 # 1. Use a specific, stable version
-FROM python:3.11-slim
+FROM --platform=linux/amd64 python:3.11-slim
 
 # 2. Set environment variables to prevent Python from buffering logs
 # (Critical for seeing errors in Docker logs!)
