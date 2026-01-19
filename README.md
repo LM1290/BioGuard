@@ -21,7 +21,7 @@ BioGuard is a deep learning inference engine designed to predict non-linear drug
 BioGuard can be run either via Docker (recommended for quick evaluation) or as a local Python installation (recommended for research and development).
 
 ### Option 1: Docker (Recommended)
-Reproducibility is critical. Run the inference engine in a fully contained environment to ensure the "Safety-First" standardization performs identically across any system.
+Reproducibility is critical. Run the inference engine in a fully contained environment to ensure BioGuard performs identically across any system.
 
 ```bash
 # 1. Build the image
