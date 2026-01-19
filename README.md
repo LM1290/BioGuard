@@ -39,7 +39,7 @@ For developers wishing to reproduce the training loop or modify the model archit
 ```bash
 
 # Clone and enter the repo
-git clone [https://github.com/LM1290/BioGuard.git](https://github.com/LM1290/BioGuard.git)
+git clone https://github.com/LM1290/BioGuard.git
 cd BioGuard
 
 # Install dependencies
