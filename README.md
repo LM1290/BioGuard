@@ -71,8 +71,7 @@ The Scaffold Gap:
   Random/Pair-Disjoint Split: 0.89 Recall / 0.81 PR-AUC. (Model memorizes structural motifs).
 
   Scaffold-Disjoint Split: 0.57 ROC-AUC.
-
-  Analysis: This performance drop indicates that ECFP4 fingerprints fail to generalize to chemically distinct scaffolds (Out-of-Distribution). The model is over-relying on local substructure memorization rather than learning global chemical rules.
+    Analysis: This performance drop indicates that ECFP4 fingerprints fail to generalize to chemically distinct scaffolds (Out-of-Distribution). The model is over-relying on local substructure memorization rather than learning global chemical rules.
 ---
 
 ## System Architecture
@@ -97,15 +96,15 @@ Note: A symmetric MLP was chosen over Graph Neural Networks (GNNs) for v1.0 to e
 
 ## V2 Roadmap & Technical Trajectory
 
-*Current development focused on the `researchdev/` branch to address public dataset limitations.*
+*Current development is active on the `feature/mpnn-integration` branch.*
 
 1.  **Hard Negative Mining:** Integrating Tanimoto-thresholded negative sampling to correct for the "soft-negative" bias inherent in random sampling.
+    *    Alpha implementation released in `feature/mpnn-integration`.
 2.  **Enzyme Profiling:** Integration of CYP450 metabolism vectors to move beyond pure structural features and model metabolic interference directly.
 3.  **Explainability:** Implementation of Integrated Gradients to map prediction weights back to specific substructural motifs.
-4.  Current validation utilizes a Random Cold-Start split (Drug Disjoint). Future iterations will implement Butina Clustering to ensure strict Scaffold Disjointness.
-
----
-
+    *   Graph Attention weights accessible in `feature/mpnn-integration`.
+4.  **Scaffold Validation:** Moving beyond Random Cold-Start splits to implement Butina Clustering and strict Scaffold Disjointness.
+    *   Benchmark complete. Scaffold-split logic available in `feature/mpnn-integration`.
 ```
 ## Citation & Contact
 
