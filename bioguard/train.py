@@ -195,7 +195,7 @@ def run_training(args):
         heads=4
     ).to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=CONFIG['LEARNING_RATE'])
+    optimizer = optim.AdamW(model.parameters(), lr=CONFIG['LEARNING_RATE'])
     criterion = nn.BCEWithLogitsLoss()
 
     # 5. Training Loop

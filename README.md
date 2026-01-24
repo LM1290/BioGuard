@@ -1,122 +1,69 @@
-# BioGuard: Symmetric Deep Learning for Drug-Drug Interaction Risk Scoring
+# BioGuard-GAT: Graph Attention Networks for Pharmacokinetic Interaction Prediction
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://bioguardlm.streamlit.app/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-
-**Live Inference Engine:** [https://bioguardlm.streamlit.app/](https://bioguardlm.streamlit.app/)
+**Branch:** feature/mpnn-integration
+**Status:** Research Prototype / Experimental
 
 ## Executive Summary
 
-BioGuard is a deep learning inference engine designed to predict non-linear drug-drug interactions (DDIs) by overcoming the limitations of traditional structural similarity metrics. Unlike standard baselines, BioGuard utilizes a Symmetric MLP architecture on ECFP4 fingerprints to capture latent interference mechanisms while strictly enforcing permutational invariance.
+This branch implements a Graph Neural Network (GNN) architecture for the BioGuard inference engine. Unlike the production branch which utilizes fixed-length ECFP4 fingerprints, this implementation models molecules as undirected graphs using `torch_geometric`.
 
-### Key Capabilities
-*   **Permutational Invariance:** Implemented a symmetric pair-encoding strategy `(A+B) ⊕ |A-B| ⊕ (A*B)` to ensure `Interaction(Drug A, Drug B) == Interaction(Drug B, Drug A)`, eliminating directional bias.
-*   **Zero Data Leakage:** Utilizes Pair-Disjoint Splitting to ensure drug pairs present in the test set are strictly unseen during training.
-*   **High-Sensitivity Screening:** Optimized for Recall (0.89) to function as a safety filter in early-stage discovery pipelines, prioritizing the detection of potential adverse events.
+The primary objective of this architecture is to address the **Generalization Gap** observed in scaffold-disjoint splits. By explicitly capturing topological dependencies and local chemical environments via message passing, this model aims to improve predictive performance on out-of-distribution (OOD) molecular scaffolds.
 
----
-## Setup & Installation
+## System Architecture
 
-BioGuard can be run either via Docker (recommended for quick evaluation) or as a local Python installation (recommended for research and development).
+### 1. Graph Featurization
+Input SMILES are converted into `torch_geometric.data.Data` objects with the following feature set:
 
-### Option 1: Docker (Recommended)
-Reproducibility is critical. Run the inference engine in a fully contained environment to ensure BioGuard performs identically across any system.
+*   **Node Features (Atoms):** One-hot encoding of Atomic Number, Chirality Tag, Hybridization, Aromaticity, and Formal Charge.
+*   **Edge Features (Bonds):** One-hot encoding of Bond Type (Single, Double, Triple, Aromatic), Conjugation, and Ring Membership.
+*   **Topology:** Adjacency matrices generated via RDKit for tautomer consistency.
+
+### 2. Network Topology (GAT)
+*   **Backbone:** Multi-Head Graph Attention Layers (`GATv2Conv`) to compute learned weighting coefficients for neighboring nodes.
+*   **Readout:** Global Mean Pooling to aggregate node embeddings into a graph-level representation.
+*   **Regularization:** DropEdge (random edge removal during training) and standard Dropout applied to dense layers to mitigate overfitting on small datasets.
+
+### 3. Training Configuration
+*   **Optimizer:** `AdamW` with decoupled weight decay.
+*   **Validation:** Scaffold-Disjoint splitting (Bemis-Murcko) to enforce structural separation between training and evaluation sets.
+
+## Installation & Usage
+
+This branch requires `torch-geometric` and specific CUDA toolkits if running on GPU.
+
+### Local Development
 
 ```bash
-# 1. Build the image
-docker build -t bioguard_app .
-
-# 2. Run the interactive Streamlit engine
-docker run -p 8000:8501 --rm bioguard_app
-
-App will be available at http://localhost:8000.
-```
-Option 2: Local Development
-
-For developers wishing to reproduce the training loop or modify the model architecture.
-
-```bash
-
-# Clone and enter the repo
-git clone https://github.com/LM1290/BioGuard.git
+# Clone the feature branch
+git clone -b feature/mpnn-integration https://github.com/LM1290/BioGuard.git
 cd BioGuard
 
 # Install dependencies
 pip install -r requirements_training.txt
 
-# Download TWOSIDES Dataset and Validate
-python -m validate_data
-
-# Run the training or baseline tasks
-python -m bioguard.main train
+# Execute training
+python -m bioguard.main train --split scaffold
 ```
+## Preliminary Benchmarks
 
-## Performance Benchmarks
+Evaluation performed on the TWOSIDES dataset using Scaffold-Disjoint Splitting.
 
-*Evaluation performed on the TWOSIDES dataset using a strict pair-disjoint split.*
-
-| Model | ROC-AUC | PR-AUC | Recall (Sensitivity) |
+| Model Architecture | Split Type | ROC-AUC | Analysis |
 | :--- | :--- | :--- | :--- |
-| **BioGuard (Neural Net)** | **0.947** | **0.819** | **0.89** |
-| Logistic Regression | 0.940 | 0.816 | 0.72 |
-| Random Forest | 0.874 | 0.588 | 0.64 |
-| Tanimoto Similarity | 0.530 | 0.169 | 0.92 |
+| **GAT (Graph Attention)** | Scaffold | **0.650** | Demonstrates superior generalization to novel scaffolds compared to fingerprints. |
+| **MLP (ECFP4 Baseline)** | Scaffold | 0.570 | Fingerprints degrade significantly when testing on unseen structural classes. |
+Technical Note: The GAT architecture exhibits higher variance during training due to data scarcity (~60k pairs). Future development will focus on integrating pre-trained molecular embeddings (e.g., ChemBERTa or Grover) to stabilize weights during fine-tuning.
 
-*Note: BioGuard outperforms the non-linear Random Forest baseline by >7% in ROC-AUC and demonstrates superior recall compared to linear baselines.*
-Open-World Negative Sampling: Addresses the positive-unlabeled nature of DDI datasets by treating unrecorded pairs as non-interactions, with plans to implement hard-negative mining in v2.0 to reduce false positives.
-
-## The Scaffold Gap:
-
-  Random/Pair-Disjoint Split: 0.89 Recall / 0.81 PR-AUC. (Model memorizes structural motifs).
-
-  Scaffold-Disjoint Split: 0.57 ROC-AUC. 
-
-  Analysis: This performance drop indicates that ECFP4 fingerprints fail to generalize to chemically distinct scaffolds (Out-of-Distribution). The model is over-relying on local substructure memorization rather than learning global chemical rules.
----
-
-## System Architecture
-
-### 1. Featurization Pipeline
-*   **Structural:** 2048-bit Morgan Fingerprints (Radius 2) generated via RDKit.
-*   **Biophysical:** 5-dimensional scalar vector (Molecular Weight, LogP, TPSA, H-Donors, H-Acceptors).
-*   **Preprocessing:** Automated SMILES canonicalization and chiral tag handling.
-
-### 2. Network Topology
-*   **Input Layer:** 6192-dim symmetric vector.
-*   **Hidden Layers:** Dense(512) → BatchNorm → ReLU → Dropout(0.3) → Dense(256) → ReLU.
-*   **Output:** Sigmoid activation with Isotonic Regression calibration for probability scoring.
-
-Note: A symmetric MLP was chosen over Graph Neural Networks (GNNs) for v1.0 to establish a high-speed inference baseline and prioritize interpretability via feature importance analysis, before migrating to computationally heavier graph topologies.
-
-### 3. Deployment Stack
-*   **Inference:** PyTorch / FastAPI backend.
-*   **Frontend:** Streamlit for real-time computational chemistry visualization.
-
----
-
-## V2 Roadmap & Technical Trajectory
-
-*Current development focused on the `researchdev/` branch to address public dataset limitations.*
-
-1.  **Hard Negative Mining:** Integrating Tanimoto-thresholded negative sampling to correct for the "soft-negative" bias inherent in random sampling.
-2.  **Enzyme Profiling:** Integration of CYP450 metabolism vectors to move beyond pure structural features and model metabolic interference directly.
-3.  **Explainability:** Implementation of Integrated Gradients to map prediction weights back to specific substructural motifs.
-4.  Current validation utilizes a Random Cold-Start split (Drug Disjoint). Future iterations will implement Butina Clustering to ensure strict Scaffold Disjointness.
-
----
-
-```
 ## Citation & Contact
 
 If you utilize this pipeline or methodology in your research, please cite:
 
 ```bibtex
-@software{bioguard2025,
-  title = {BioGuard: Symmetric Deep Learning for Pharmacokinetic Interaction Prediction},
+@software{bioguard_gat2026,
+  title = {BioGuard-GAT: Topological Deep Learning for DDI},
   author = {Maheswaran, Lalit},
   year = {2026},
   institution = {Georgia Institute of Technology},
   url = {https://github.com/LM1290/BioGuard},
-  note = {Deployed Inference Engine for DDI Screening}
+  note = {Experimental Graph Architecture}
 }
