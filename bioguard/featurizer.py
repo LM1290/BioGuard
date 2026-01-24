@@ -1,117 +1,122 @@
 """
-Molecular featurization module for DDI prediction.
-
-Combines structural fingerprints with biophysical properties
-to create comprehensive drug pair representations.
+Molecular featurization module.
+Contains BOTH:
+1. BioFeaturizer (Fingerprints) -> For Baselines
+2. GraphFeaturizer (Graphs) -> For BioGuardGAT
 """
 
 import numpy as np
+import torch
 import pandas as pd
 from rdkit import Chem, DataStructs
-from rdkit.Chem import rdFingerprintGenerator, Descriptors
+from rdkit.Chem import rdFingerprintGenerator, Descriptors, rdchem
 from rdkit.Chem.MolStandardize import rdMolStandardize
-
-FINGERPRINT_SIZE = 2048
-MAX_SMILES_LENGTH = 5000
-BIO_PHYS_DIM = 5  # MW, LogP, TPSA, H-donors, H-acceptors
-ENZYME_DIM = 11   # Enzyme features (for compatibility with trained model)
+from torch_geometric.data import Data
 
 
+# --- 1. LEGACY FEATURIZER (FOR BASELINES) ---
 class BioFeaturizer:
-    """
-    Featurizer for drug-drug interaction prediction.
-    
-    Features per drug:
-    - Morgan fingerprints (2048-bit, radius 2)
-    - Biophysical properties (5 features)
-    - Enzyme features (11 features, zeros for deployment)
-    
-    Pair features: [sum, diff, product] of individual drug features
-    """
-
     def __init__(self):
-        self.single_drug_dim = FINGERPRINT_SIZE + BIO_PHYS_DIM + ENZYME_DIM
-        self.total_dim = self.single_drug_dim * 3  # sum, diff, product
+        self.fp_size = 2048
+        self.morgan_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
-        self.morgan_gen = rdFingerprintGenerator.GetMorganGenerator(
-            radius=2,
-            fpSize=FINGERPRINT_SIZE,
-            includeChirality=True
-        )
-        self.tautomer_enumerator = rdMolStandardize.TautomerEnumerator()
-
-        # SAFETY LIMITS: Prevent hangs on molecules with thousands of tautomers
-        self.tautomer_enumerator.SetMaxTautomers(50)
-        self.tautomer_enumerator.SetMaxTransforms(50)
-    def _get_bio_physical_features(self, mol):
-        """Calculate normalized biophysical properties."""
-        if mol is None:
-            return np.zeros(BIO_PHYS_DIM, dtype=np.float32)
-        
-        try:
-            return np.array([
-                Descriptors.MolWt(mol) / 500.0,
-                Descriptors.MolLogP(mol) / 5.0,
-                Descriptors.TPSA(mol) / 100.0,
-                Descriptors.NumHDonors(mol) / 5.0,
-                Descriptors.NumHAcceptors(mol) / 10.0
-            ], dtype=np.float32)
-        except:
-            return np.zeros(BIO_PHYS_DIM, dtype=np.float32)
-
-    def _get_enzyme_features(self, mol):
-        """
-        Enzyme features placeholder.
-        Returns zeros since enzyme data not available in deployment.
-        Model was trained with these features, so we maintain compatibility.
-        """
-        return np.zeros(ENZYME_DIM, dtype=np.float32)
-
-    def featurize_single_drug(self, smiles, drug_name=None):
-        """Featurize a single drug with safety-first standardization."""
-        if pd.isna(smiles) or not smiles:
-            return np.zeros(self.single_drug_dim, dtype=np.float32)
-
+    def featurize_single_drug(self, smiles):
+        if not smiles: return np.zeros(2048 + 5)
         mol = Chem.MolFromSmiles(smiles)
+        if not mol: return np.zeros(2048 + 5)
 
-        if mol:
-            try:
-                # 1. ALWAYS strip salts and uncharge (very robust)
-                mol = rdMolStandardize.ChargeParent(mol)
-
-                try:
-                    # 2. TRY to canonicalize tautomers
-                    mol = self.tautomer_enumerator.Canonicalize(mol)
-                except:
-                    # 3. FALLBACK: If tautomers fail, keep the salt-stripped version
-                    # This prevents returning zeros for valid but complex drugs
-                    pass
-            except:
-                # Only return zeros if the molecule is completely unreadable
-                return np.zeros(self.single_drug_dim, dtype=np.float32)
-
-        if mol is None:
-            return np.zeros(self.single_drug_dim, dtype=np.float32)
-
-        # Morgan fingerprint
-        fp_arr = np.zeros(FINGERPRINT_SIZE, dtype=np.float32)
         fp = self.morgan_gen.GetFingerprint(mol)
-        DataStructs.ConvertToNumpyArray(fp, fp_arr)
+        arr = np.zeros((0,), dtype=np.float32)
+        DataStructs.ConvertToNumpyArray(fp, arr)
 
-        # Biophysical properties
-        phys_arr = self._get_bio_physical_features(mol)
-
-        # Enzyme features (zeros for deployment)
-        enzyme_arr = self._get_enzyme_features(mol)
-
-        return np.concatenate([fp_arr, phys_arr, enzyme_arr])
-    def featurize_pair(self, smiles_a, smiles_b, name_a=None, name_b=None):
-        """Featurize a drug pair using symmetric operations."""
-        vec_a = self.featurize_single_drug(smiles_a, name_a)
-        vec_b = self.featurize_single_drug(smiles_b, name_b)
-        
-        return np.concatenate([
-            vec_a + vec_b,
-            np.abs(vec_a - vec_b),
-            vec_a * vec_b
+        phys = np.array([
+            Descriptors.MolWt(mol), Descriptors.MolLogP(mol),
+            Descriptors.TPSA(mol), Descriptors.NumHDonors(mol),
+            Descriptors.NumHAcceptors(mol)
         ])
+        return np.concatenate([arr, phys])
+
+    def featurize_pair(self, s1, s2):
+        v1 = self.featurize_single_drug(s1)
+        v2 = self.featurize_single_drug(s2)
+        return np.concatenate([v1 + v2, np.abs(v1 - v2), v1 * v2])
+
+
+# --- 2. NEW GRAPH FEATURIZER (FOR GAT) ---
+class GraphFeaturizer:
+    def __init__(self):
+        # Atoms: C N O S F Cl Br I P
+        self.atom_types = ['C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'I', 'P']
+        self.hybridization = [
+            rdchem.HybridizationType.SP,
+            rdchem.HybridizationType.SP2,
+            rdchem.HybridizationType.SP3,
+            rdchem.HybridizationType.SP3D,
+            rdchem.HybridizationType.SP3D2
+        ]
+
+        # Node dim: 9 (types) + 6 (degrees) + 5 (hybrid) + 1 (aromatic) + 1 (formal charge) = 22
+        self.node_dim = 22
+        # Edge dim: 4 (Bond types) + 1 (Conjugated) + 1 (InRing) = 6
+        self.edge_dim = 6
+
+    def _one_hot(self, x, allowable_set):
+        if x not in allowable_set: x = allowable_set[-1]
+        return list(map(lambda s: x == s, allowable_set))
+
+    def smiles_to_graph(self, smiles):
+        mol = Chem.MolFromSmiles(smiles)
+        if not mol:
+            return Data(
+                x=torch.zeros((1, self.node_dim)),
+                edge_index=torch.empty((2, 0), dtype=torch.long),
+                edge_attr=torch.empty((0, self.edge_dim))
+            )
+
+        # 1. Node Features (Atom properties)
+        x = []
+        for atom in mol.GetAtoms():
+            features = (
+                    self._one_hot(atom.GetSymbol(), self.atom_types) +
+                    self._one_hot(atom.GetDegree(), [0, 1, 2, 3, 4, 5]) +
+                    self._one_hot(atom.GetHybridization(), self.hybridization) +
+                    [1 if atom.GetIsAromatic() else 0] +
+                    [atom.GetFormalCharge()]
+            )
+            x.append(features)
+        x = torch.tensor(x, dtype=torch.float)
+
+        # 2. Edge Features (Bond properties)
+        edge_indices = []
+        edge_attrs = []
+
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+
+            # Feature vector
+            bond_type = bond.GetBondType()
+            feats = [
+                1 if bond_type == rdchem.BondType.SINGLE else 0,
+                1 if bond_type == rdchem.BondType.DOUBLE else 0,
+                1 if bond_type == rdchem.BondType.TRIPLE else 0,
+                1 if bond_type == rdchem.BondType.AROMATIC else 0,
+                1 if bond.GetIsConjugated() else 0,
+                1 if bond.IsInRing() else 0
+            ]
+
+            # Add bidirectional edges
+            edge_indices.append((i, j))
+            edge_attrs.append(feats)
+
+            edge_indices.append((j, i))
+            edge_attrs.append(feats)
+
+        if not edge_indices:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attr = torch.empty((0, self.edge_dim))
+        else:
+            edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
+            edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
+
+        return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)

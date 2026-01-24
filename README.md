@@ -66,11 +66,11 @@ python -m bioguard.main train
 *Note: BioGuard outperforms the non-linear Random Forest baseline by >7% in ROC-AUC and demonstrates superior recall compared to linear baselines.*
 Open-World Negative Sampling: Addresses the positive-unlabeled nature of DDI datasets by treating unrecorded pairs as non-interactions, with plans to implement hard-negative mining in v2.0 to reduce false positives.
 
-The Scaffold Gap:
+## The Scaffold Gap:
 
   Random/Pair-Disjoint Split: 0.89 Recall / 0.81 PR-AUC. (Model memorizes structural motifs).
 
-  Scaffold-Disjoint Split: 0.57 ROC-AUC.
+  Scaffold-Disjoint Split: 0.57 ROC-AUC. 
 
   Analysis: This performance drop indicates that ECFP4 fingerprints fail to generalize to chemically distinct scaffolds (Out-of-Distribution). The model is over-relying on local substructure memorization rather than learning global chemical rules.
 ---

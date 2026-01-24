@@ -1,14 +1,11 @@
 """
-Training module for BioGuardNet DDI prediction model.
-
-Supports pair-disjoint evaluation strategy with early stopping,
-probability calibration, and comprehensive metrics logging.
+Training module for BioGuardGAT DDI prediction model.
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 import os
@@ -21,13 +18,16 @@ from sklearn.metrics import precision_recall_curve
 from joblib import dump
 from tqdm import tqdm
 
+# CRITICAL: Use PyG Loader for graphs
+from torch_geometric.loader import DataLoader as PyGDataLoader
+
 from .data_loader import load_twosides_data
-from .featurizer import BioFeaturizer
-from .model import BioGuardNet
+from .featurizer import GraphFeaturizer
+from .model import BioGuardGAT
 
 CONFIG = {
     'BATCH_SIZE': 128,
-    'LEARNING_RATE': 5e-5,
+    'LEARNING_RATE': 5e-4,
     'EPOCHS': 40,
     'PATIENCE': 8,
     'NUM_WORKERS': 0,
@@ -48,289 +48,199 @@ def set_seed(seed):
 
 
 def get_pair_disjoint_split(df, test_size=0.2, val_size=0.1, seed=42):
-    """
-    Create pair-disjoint split for evaluating NEW COMBINATIONS of KNOWN drugs.
-    
-    If data_loader has already created splits (with realistic test imbalance),
-    respects those boundaries. Otherwise creates balanced splits.
-    
-    Args:
-        df: DataFrame with drug pairs
-        test_size: Fraction for test set
-        val_size: Fraction for validation set
-        seed: Random seed
-        
-    Returns:
-        train_df, val_df, test_df
-    """
-    # Check for pre-existing split
     if 'split' in df.columns:
-        print("Using pre-defined splits from data_loader")
-        
-        train_df = df[df['split'] == 'train'].drop(columns=['split'], errors='ignore').copy()
-        val_df = df[df['split'] == 'val'].drop(columns=['split'], errors='ignore').copy()
-        test_df = df[df['split'] == 'test'].drop(columns=['split'], errors='ignore').copy()
-        
-        print(f"  Train: {len(train_df)} pairs ({train_df['label'].mean():.1%} positive)")
-        print(f"  Val:   {len(val_df)} pairs ({val_df['label'].mean():.1%} positive)")
-        print(f"  Test:  {len(test_df)} pairs ({test_df['label'].mean():.1%} positive)")
-        
+        train_df = df[df['split'] == 'train'].copy()
+        val_df = df[df['split'] == 'val'].copy()
+        test_df = df[df['split'] == 'test'].copy()
         return train_df, val_df, test_df
-    
-    # Create new split
-    print("Creating pair-disjoint split...")
-    
-    train_val_df, test_df = train_test_split(
-        df,
-        test_size=test_size,
-        random_state=seed,
-        stratify=df['label']
-    )
-    
-    val_fraction = val_size / (1 - test_size)
-    train_df, val_df = train_test_split(
-        train_val_df,
-        test_size=val_fraction,
-        random_state=seed,
-        stratify=train_val_df['label']
-    )
-    
-    print(f"  Train: {len(train_df)} pairs ({train_df['label'].mean():.1%} positive)")
-    print(f"  Val:   {len(val_df)} pairs ({val_df['label'].mean():.1%} positive)")
-    print(f"  Test:  {len(test_df)} pairs ({test_df['label'].mean():.1%} positive)")
-    
-    # Verify no pair overlap
-    train_pairs = set(zip(train_df['drug_a'], train_df['drug_b']))
-    val_pairs = set(zip(val_df['drug_a'], val_df['drug_b']))
-    test_pairs = set(zip(test_df['drug_a'], test_df['drug_b']))
-    
-    overlap_tv = len(train_pairs & val_pairs)
-    overlap_tt = len(train_pairs & test_pairs)
-    overlap_vt = len(val_pairs & test_pairs)
-    
-    if overlap_tv > 0 or overlap_tt > 0 or overlap_vt > 0:
-        raise ValueError(f"Pair leakage detected: T-V={overlap_tv}, T-T={overlap_tt}, V-T={overlap_vt}")
-    
-    return train_df, val_df, test_df
+
+    train_val, test = train_test_split(df, test_size=test_size, random_state=seed)
+    train, val = train_test_split(train_val, test_size=val_size / (1 - test_size), random_state=seed)
+    return train, val, test
 
 
 class BioDataset(Dataset):
     """
-    PyTorch dataset for DDI prediction.
-    Pre-computes drug features for efficiency.
+    Optimized Dataset that pre-computes graphs into RAM.
     """
-    
-    def __init__(self, df):
+
+    def __init__(self, df, name="Dataset"):
         self.df = df.reset_index(drop=True)
-        self.featurizer = BioFeaturizer()
-        
-        # Pre-compute all drug features
-        print("  Pre-computing drug features...")
-        self.drug_cache = {}
-        
-        all_drugs = pd.concat([
-            df[['drug_a', 'smiles_a']].rename(columns={'drug_a': 'id', 'smiles_a': 'smiles'}),
-            df[['drug_b', 'smiles_b']].rename(columns={'drug_b': 'id', 'smiles_b': 'smiles'})
-        ]).drop_duplicates(subset='id')
-        
-        for _, row in tqdm(all_drugs.iterrows(), total=len(all_drugs), desc="  Featurizing", leave=False):
-            vec = self.featurizer.featurize_single_drug(row['smiles'], row['id'])
-            self.drug_cache[row['id']] = vec
-        
-        print(f"  Cached {len(self.drug_cache)} drug feature vectors")
-    
+        self.featurizer = GraphFeaturizer()
+        self.cached_data = []
+
+        print(f"[{name}] Pre-computing graphs into RAM (this happens once)...")
+        # Pre-compute all graphs so we don't do it every epoch
+        for _, row in tqdm(self.df.iterrows(), total=len(self.df)):
+            data_a = self.featurizer.smiles_to_graph(row['smiles_a'])
+            data_b = self.featurizer.smiles_to_graph(row['smiles_b'])
+            label = torch.tensor(row['label'], dtype=torch.float32)
+            self.cached_data.append((data_a, data_b, label))
+
     def __len__(self):
-        return len(self.df)
-    
+        return len(self.cached_data)
+
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        
-        vec_a = self.drug_cache.get(row['drug_a'])
-        vec_b = self.drug_cache.get(row['drug_b'])
-        
-        if vec_a is None or vec_b is None:
-            return torch.zeros(self.featurizer.total_dim), torch.FloatTensor([row['label']])
-        
-        # Compute pair features
-        pair_vec = np.concatenate([
-            vec_a + vec_b,
-            np.abs(vec_a - vec_b),
-            vec_a * vec_b
-        ])
-        
-        return torch.FloatTensor(pair_vec), torch.FloatTensor([row['label']])
+        # Zero computation here, just list access
+        return self.cached_data[idx]
 
 
 def run_training(split_type='pair_disjoint'):
-    """
-    Train BioGuardNet model with pair-disjoint evaluation.
-    
-    Args:
-        split_type: Only 'pair_disjoint' is supported in production
-    """
-    if split_type != 'pair_disjoint':
-        raise ValueError(f"Only 'pair_disjoint' split is supported in production. Got: {split_type}")
-    
     set_seed(CONFIG['SEED'])
-    
-    artifact_dir = ARTIFACT_DIR
-    os.makedirs(artifact_dir, exist_ok=True)
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training on {device}")
-    print(f"Split type: {split_type.upper()}")
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    print(f"Training BioGuardGAT on {device} (Split: {split_type})")
 
-    # Load data
-    print("\nLoading data...")
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
+
+    # 1. Load Data
+    print("Loading TWOSIDES dataset...")
     df = load_twosides_data()
-    
-    # Create splits
-    train_df, val_df, test_df = get_pair_disjoint_split(df, seed=CONFIG['SEED'])
-    
-    # Create datasets
-    print("\nPreparing training data...")
-    train_dataset = BioDataset(train_df)
-    print("Preparing validation data...")
-    val_dataset = BioDataset(val_df)
-    
-    input_dim = train_dataset.featurizer.total_dim
-    print(f"Feature dimension: {input_dim}")
-    
-    # Create dataloaders
-    train_loader = DataLoader(
+    train_df, val_df, test_df = get_pair_disjoint_split(df)
+
+    print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+
+    # 2. Initialize Datasets with Caching
+    # This will show a progress bar and take ~30-60s to start
+    train_dataset = BioDataset(train_df, name="Train")
+    val_dataset = BioDataset(val_df, name="Val")
+
+    train_loader = PyGDataLoader(
         train_dataset,
         batch_size=CONFIG['BATCH_SIZE'],
         shuffle=True,
         num_workers=CONFIG['NUM_WORKERS']
     )
-    val_loader = DataLoader(
+
+    val_loader = PyGDataLoader(
         val_dataset,
         batch_size=CONFIG['BATCH_SIZE'],
         shuffle=False,
         num_workers=CONFIG['NUM_WORKERS']
     )
 
-    # Initialize model
-    model = BioGuardNet(input_dim=input_dim).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=CONFIG['LEARNING_RATE'])
+    # 3. Initialize Model
+    model = BioGuardGAT(
+        node_dim=22,
+        edge_dim=6,
+        embedding_dim=128,
+        heads=4
+    ).to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=CONFIG['LEARNING_RATE'])
     criterion = nn.BCEWithLogitsLoss()
-    
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # Training loop
+
+    # 4. Training Loop
     best_val_loss = float('inf')
     patience_counter = 0
-    
-    print(f"\nTraining for {CONFIG['EPOCHS']} epochs (patience={CONFIG['PATIENCE']})")
-    print("-" * 60)
-    
+
+    print("\nStarting training loop...")
     for epoch in range(CONFIG['EPOCHS']):
-        # Training
+        # --- TRAIN ---
         model.train()
-        train_loss = 0.0
-        
-        for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            
+        train_loss = 0
+
+        # This loop will now be very fast
+        for batch_a, batch_b, batch_y in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{CONFIG['EPOCHS']}"):
+            batch_a = batch_a.to(device)
+            batch_b = batch_b.to(device)
+            batch_y = batch_y.to(device).unsqueeze(1)
+
             optimizer.zero_grad()
-            logits = model(batch_X)
+            logits = model(batch_a, batch_b)
             loss = criterion(logits, batch_y)
             loss.backward()
             optimizer.step()
-            
+
             train_loss += loss.item()
-        
+
         avg_train_loss = train_loss / len(train_loader)
-        
-        # Validation
+
+        # --- VALIDATE ---
         model.eval()
-        val_loss = 0.0
-        
+        val_loss = 0
+        y_true_val = []
+        y_probs_val = []
+
         with torch.no_grad():
-            for batch_X, batch_y in val_loader:
-                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                logits = model(batch_X)
+            for batch_a, batch_b, batch_y in val_loader:
+                batch_a = batch_a.to(device)
+                batch_b = batch_b.to(device)
+                batch_y = batch_y.to(device).unsqueeze(1)
+
+                logits = model(batch_a, batch_b)
                 loss = criterion(logits, batch_y)
                 val_loss += loss.item()
-        
+
+                probs = torch.sigmoid(logits).cpu().numpy()
+                y_true_val.extend(batch_y.cpu().numpy())
+                y_probs_val.extend(probs)
+
         avg_val_loss = val_loss / len(val_loader)
-        
-        print(f"Epoch {epoch+1:3d}/{CONFIG['EPOCHS']} | "
-              f"Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f}", end="")
-        
-        # Early stopping
+
+        print(f"Epoch {epoch + 1}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}")
+
+        # --- CHECKPOINTING ---
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(artifact_dir, 'model.pt'))
-            print(" [BEST]")
+            torch.save(model.state_dict(), os.path.join(ARTIFACT_DIR, 'model.pt'))
+
+            y_true_val = np.array(y_true_val).flatten()
+            y_probs_val = np.array(y_probs_val).flatten()
+            np.savez(
+                os.path.join(ARTIFACT_DIR, 'calibration_data.npz'),
+                y_true=y_true_val,
+                y_prob=y_probs_val
+            )
         else:
             patience_counter += 1
-            print(f" [patience: {patience_counter}/{CONFIG['PATIENCE']}]")
-            
             if patience_counter >= CONFIG['PATIENCE']:
-                print(f"Early stopping triggered at epoch {epoch+1}")
+                print(f"Early stopping triggered after {epoch + 1} epochs.")
                 break
-    
-    # Load best model for calibration
-    print("\nCalibrating probabilities...")
-    model.load_state_dict(torch.load(os.path.join(artifact_dir, 'model.pt')))
-    model.eval()
-    
-    # Get validation predictions
-    y_true_val = []
-    y_logits_val = []
-    
-    with torch.no_grad():
-        for batch_X, batch_y in val_loader:
-            batch_X = batch_X.to(device)
-            logits = model(batch_X)
-            
-            y_logits_val.extend(logits.cpu().numpy().flatten())
-            y_true_val.extend(batch_y.numpy().flatten())
-    
-    y_true_val = np.array(y_true_val)
-    y_probs_val = 1 / (1 + np.exp(-np.array(y_logits_val)))
-    
-    # Fit calibrator
-    iso = IsotonicRegression(out_of_bounds='clip', y_min=0, y_max=1)
+
+    # 5. Calibration
+    print("\nTraining complete. Calibrating...")
+    calib_data = np.load(os.path.join(ARTIFACT_DIR, 'calibration_data.npz'))
+    y_true_val = calib_data['y_true']
+    y_probs_val = calib_data['y_prob']
+
+    iso = IsotonicRegression(out_of_bounds='clip')
     iso.fit(y_probs_val, y_true_val)
-    dump(iso, os.path.join(artifact_dir, 'calibrator.joblib'))
-    
-    # Find optimal threshold
+    dump(iso, os.path.join(ARTIFACT_DIR, 'calibrator.joblib'))
+
     y_calibrated = iso.transform(y_probs_val)
     precision, recall, thresholds = precision_recall_curve(y_true_val, y_calibrated)
-    
+
     f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
     optimal_idx = np.argmax(f1_scores)
     optimal_threshold = thresholds[optimal_idx] if optimal_idx < len(thresholds) else 0.5
-    
+
     print(f"Optimal threshold: {optimal_threshold:.4f} (F1={f1_scores[optimal_idx]:.4f})")
-    
-    # Save metadata
+
     metadata = {
-        'version': f'2.0-{split_type}',
+        'version': f'2.0-GAT-{split_type}',
         'split_type': split_type,
         'config': CONFIG,
         'threshold': float(optimal_threshold),
-        'input_dim': input_dim,
+        'model_type': 'GAT',
         'best_val_loss': float(best_val_loss),
         'split_info': {
             'train_size': len(train_df),
             'val_size': len(val_df),
-            'test_size': len(test_df),
-            'train_positive_rate': float(train_df['label'].mean()),
-            'val_positive_rate': float(val_df['label'].mean()),
-            'test_positive_rate': float(test_df['label'].mean())
+            'test_size': len(test_df)
         }
     }
-    
-    with open(os.path.join(artifact_dir, 'metadata.json'), 'w') as f:
+
+    with open(os.path.join(ARTIFACT_DIR, 'metadata.json'), 'w') as f:
         json.dump(metadata, f, indent=2)
-    
-    print("\nTraining complete")
-    print(f"Artifacts saved to: {artifact_dir}/")
-    print(f"  - model.pt")
-    print(f"  - calibrator.joblib")
-    print(f"  - metadata.json")
-    print(f"\nNext: python -m bioguard.main eval")
+
+    print(f"[OK] Model artifacts saved to {ARTIFACT_DIR}")
+
+
+if __name__ == "__main__":
+    run_training()

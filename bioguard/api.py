@@ -10,8 +10,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, constr
 from typing import List, Optional
 
-from .model import BioGuardNet
-from .featurizer import BioFeaturizer
+from .model import BioGuardGAT
+from .featurizer import GraphFeaturizer
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 ARTIFACT_DIR = os.getenv("BG_ARTIFACT_DIR", os.path.join(BASE_DIR, 'artifacts'))
@@ -26,14 +26,14 @@ CATALOG_PATH = os.path.join(DATA_DIR, 'drug_catalog.csv')
 logger = logging.getLogger("bioguard")
 
 # Module-level worker state (initialized once per worker process)
-worker_featurizer: Optional[BioFeaturizer] = None
+worker_featurizer: Optional[GraphFeaturizer] = None
 
 
 def worker_init():
     """Initialize worker-local state. Called once per process."""
     global worker_featurizer
     try:
-        worker_featurizer = BioFeaturizer()
+        worker_featurizer = GraphFeaturizer()
         logger.info("Worker initialized successfully")
     except Exception as e:
         logger.error(f"Worker init failed: {e}")
@@ -82,8 +82,8 @@ async def lifespan(app: FastAPI):
 
     # Load Model
     device = torch.device("cpu")
-    temp_feat = BioFeaturizer()
-    model = BioGuardNet(input_dim=temp_feat.total_dim).to(device)
+    temp_feat = GraphFeaturizer()
+    model = BioGuardGAT(input_dim=temp_feat.total_dim).to(device)
 
     app.state.model_ready = False
     app.state.calibrator = None

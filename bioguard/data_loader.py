@@ -145,21 +145,23 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
     # Canonicalize pairs
     print("Canonicalizing drug pairs...")
     original_count = len(df_pos)
-    
-    canonical_pairs = []
-    for _, row in df_pos.iterrows():
-        ca, cb, sa, sb = _canonicalize_pair(
-            row['drug_a'], row['drug_b'], 
-            row['smiles_a'], row['smiles_b']
-        )
-        canonical_pairs.append({
-            'drug_a': ca,
-            'drug_b': cb,
-            'smiles_a': sa,
-            'smiles_b': sb
-        })
-    
-    df_pos = pd.DataFrame(canonical_pairs)
+
+    # Identify rows where Drug A > Drug B (alphabetically)
+    mask = df_pos['drug_a'] > df_pos['drug_b']
+
+    drug_a_vals = df_pos['drug_a'].values
+    drug_b_vals = df_pos['drug_b'].values
+
+    df_pos['drug_a'] = np.where(mask, drug_b_vals, drug_a_vals)
+    df_pos['drug_b'] = np.where(mask, drug_a_vals, drug_b_vals)
+
+    # Swap SMILES where necessary
+    smiles_a_vals = df_pos['smiles_a'].values
+    smiles_b_vals = df_pos['smiles_b'].values
+
+    df_pos['smiles_a'] = np.where(mask, smiles_b_vals, smiles_a_vals)
+    df_pos['smiles_b'] = np.where(mask, smiles_a_vals, smiles_b_vals)
+
     df_pos['label'] = 1.0
     df_pos = df_pos.drop_duplicates(subset=['drug_a', 'drug_b'], keep='first')
     
@@ -270,12 +272,14 @@ def _generate_negatives_hybrid(df_pos, n_negatives, seed):
     
     valid_ids = [i for i, fp in id_to_fp.items() if fp is not None]
 
-    # Track existing pairs (positives + negatives already generated)
-    existing_pairs = set()
-    for _, row in df_pos.iterrows():
-        ca, cb, _, _ = _canonicalize_pair(row['drug_a'], row['drug_b'], '', '')
-        existing_pairs.add((ca, cb))
+    # Robust canonicalization (handles cases where input df might not be sorted)
+    mask = df_pos['drug_a'] > df_pos['drug_b']
 
+    canon_a = np.where(mask, df_pos['drug_b'], df_pos['drug_a'])
+    canon_b = np.where(mask, df_pos['drug_a'], df_pos['drug_b'])
+
+    # Create set directly from zipped arrays
+    existing_pairs = set(zip(canon_a, canon_b))
     n_hard = n_negatives // 2
     n_random = n_negatives - n_hard
 
