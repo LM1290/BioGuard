@@ -1,5 +1,6 @@
 """
 Training module for BioGuardGAT DDI prediction model.
+UPDATED: v1.2: Bemis-Murcko Support
 """
 
 import torch
@@ -11,20 +12,22 @@ import pandas as pd
 import os
 import json
 import random
-import joblib
+import argparse  # <--- Added for CLI
+from collections import defaultdict
 from sklearn.model_selection import train_test_split
-from sklearn.isotonic import IsotonicRegression
-from sklearn.metrics import precision_recall_curve
-from joblib import dump
 from tqdm import tqdm
 
-# CRITICAL: Use PyG Loader for graphs
+# RDKit Scaffolding
+from rdkit import Chem
+from rdkit.Chem.Scaffolds import MurckoScaffold
+
 from torch_geometric.loader import DataLoader as PyGDataLoader
 
 from .data_loader import load_twosides_data
 from .featurizer import GraphFeaturizer
 from .model import BioGuardGAT
 
+# Default Config (can be overridden by CLI)
 CONFIG = {
     'BATCH_SIZE': 128,
     'LEARNING_RATE': 5e-4,
@@ -39,7 +42,6 @@ ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
 
 
 def set_seed(seed):
-    """Set random seeds for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -47,30 +49,91 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def get_pair_disjoint_split(df, test_size=0.2, val_size=0.1, seed=42):
-    if 'split' in df.columns:
-        train_df = df[df['split'] == 'train'].copy()
-        val_df = df[df['split'] == 'val'].copy()
-        test_df = df[df['split'] == 'test'].copy()
-        return train_df, val_df, test_df
-
+# --- 1. PAIR SPLIT (Baseline/Weak) ---
+def get_pair_disjoint_split(df, val_size=0.1, test_size=0.1, seed=42):
+    print("Performing Pair Disjoint Split (Weak Baseline)...")
     train_val, test = train_test_split(df, test_size=test_size, random_state=seed)
     train, val = train_test_split(train_val, test_size=val_size / (1 - test_size), random_state=seed)
     return train, val, test
 
 
-class BioDataset(Dataset):
+# --- 2. COLD DRUG SPLIT (Strict) ---
+def get_cold_drug_split(df, val_size=0.1, test_size=0.1, seed=42):
     """
-    Optimized Dataset that pre-computes graphs into RAM.
+    Splits data by DRUG (scaffold), not by PAIR.
+    Ensures that drugs in Val/Test have NEVER been seen in Train.
     """
+    print("Performing Cold Drug Split (Strict Mode)...")
 
+    unique_drugs = list(set(df['smiles_a']) | set(df['smiles_b']))
+    train_drugs, temp_drugs = train_test_split(unique_drugs, test_size=(test_size + val_size), random_state=seed)
+    val_drugs, test_drugs = train_test_split(temp_drugs, test_size=(test_size / (test_size + val_size)),
+                                             random_state=seed)
+
+    train_set, val_set, test_set = set(train_drugs), set(val_drugs), set(test_drugs)
+
+    # Filter: Both drugs must be in the respective set
+    train_df = df[df['smiles_a'].isin(train_set) & df['smiles_b'].isin(train_set)].copy()
+    val_df = df[df['smiles_a'].isin(val_set) & df['smiles_b'].isin(val_set)].copy()
+    test_df = df[df['smiles_a'].isin(test_set) & df['smiles_b'].isin(test_set)].copy()
+
+    return train_df, val_df, test_df
+
+
+# --- 3. BEMIS-MURCKO SCAFFOLD SPLIT (The Nuclear Option) ---
+def generate_scaffold(smiles, include_chirality=False):
+    """Compute the Bemis-Murcko scaffold for a SMILES string."""
+    mol = Chem.MolFromSmiles(smiles)
+    if not mol:
+        return None
+    scaffold = MurckoScaffold.MurckoScaffoldSmiles(mol=mol, includeChirality=include_chirality)
+    return scaffold
+
+
+def get_scaffold_split(df, val_size=0.1, test_size=0.1, seed=42):
+    """
+    Splits drugs based on their core chemical scaffold.
+    This tests if the model can generalize to completely new chemical families.
+    """
+    print("Performing Bemis-Murcko Scaffold Split (Nuclear Option)...")
+
+    unique_drugs = list(set(df['smiles_a']) | set(df['smiles_b']))
+    scaffold_to_drugs = defaultdict(list)
+
+    print("Generating scaffolds...")
+    for smiles in tqdm(unique_drugs):
+        scaffold = generate_scaffold(smiles)
+        if scaffold is not None:
+            scaffold_to_drugs[scaffold].append(smiles)
+
+    # Split the SCAFFOLDS (not the drugs)
+    scaffolds = list(scaffold_to_drugs.keys())
+    train_scaff, temp_scaff = train_test_split(scaffolds, test_size=(test_size + val_size), random_state=seed)
+    val_scaff, test_scaff = train_test_split(temp_scaff, test_size=(test_size / (test_size + val_size)),
+                                             random_state=seed)
+
+    # Map back to drugs
+    train_drugs = set([d for s in train_scaff for d in scaffold_to_drugs[s]])
+    val_drugs = set([d for s in val_scaff for d in scaffold_to_drugs[s]])
+    test_drugs = set([d for s in test_scaff for d in scaffold_to_drugs[s]])
+
+    print(f"Scaffolds -> Train: {len(train_scaff)}, Val: {len(val_scaff)}, Test: {len(test_scaff)}")
+
+    # Filter Dataframe (Both drugs must belong to the split's scaffold set)
+    train_df = df[df['smiles_a'].isin(train_drugs) & df['smiles_b'].isin(train_drugs)].copy()
+    val_df = df[df['smiles_a'].isin(val_drugs) & df['smiles_b'].isin(val_drugs)].copy()
+    test_df = df[df['smiles_a'].isin(test_drugs) & df['smiles_b'].isin(test_drugs)].copy()
+
+    return train_df, val_df, test_df
+
+
+class BioDataset(Dataset):
     def __init__(self, df, name="Dataset"):
         self.df = df.reset_index(drop=True)
         self.featurizer = GraphFeaturizer()
         self.cached_data = []
 
-        print(f"[{name}] Pre-computing graphs into RAM (this happens once)...")
-        # Pre-compute all graphs so we don't do it every epoch
+        print(f"[{name}] Pre-computing graphs into RAM...")
         for _, row in tqdm(self.df.iterrows(), total=len(self.df)):
             data_a = self.featurizer.smiles_to_graph(row['smiles_a'])
             data_b = self.featurizer.smiles_to_graph(row['smiles_b'])
@@ -81,51 +144,52 @@ class BioDataset(Dataset):
         return len(self.cached_data)
 
     def __getitem__(self, idx):
-        # Zero computation here, just list access
         return self.cached_data[idx]
 
 
-def run_training(split_type='pair_disjoint'):
+def run_training(args):
     set_seed(CONFIG['SEED'])
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    print(f"Training BioGuardGAT on {device} (Split: {split_type})")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.backends.mps.is_available(): device = torch.device("mps")
+
+    print(f"--- BioGuard Training v3.0 ---")
+    print(f"Device: {device}")
+    print(f"Split Strategy: {args.split.upper()}")
 
     os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
     # 1. Load Data
     print("Loading TWOSIDES dataset...")
     df = load_twosides_data()
-    train_df, val_df, test_df = get_pair_disjoint_split(df)
 
-    print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+    # 2. Apply Selected Split
+    if args.split == 'random':
+        train_df, val_df, test_df = get_pair_disjoint_split(df)
+    elif args.split == 'cold':
+        train_df, val_df, test_df = get_cold_drug_split(df)
+    elif args.split == 'scaffold':
+        train_df, val_df, test_df = get_scaffold_split(df)
+    else:
+        raise ValueError(f"Unknown split type: {args.split}")
 
-    # 2. Initialize Datasets with Caching
-    # This will show a progress bar and take ~30-60s to start
+    print(f"Final Counts -> Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+
+    if len(train_df) == 0 or len(val_df) == 0:
+        raise ValueError("Selected split resulted in empty datasets. Dataset too sparse!")
+
+    # 3. Initialize Datasets
     train_dataset = BioDataset(train_df, name="Train")
     val_dataset = BioDataset(val_df, name="Val")
 
-    train_loader = PyGDataLoader(
-        train_dataset,
-        batch_size=CONFIG['BATCH_SIZE'],
-        shuffle=True,
-        num_workers=CONFIG['NUM_WORKERS']
-    )
+    train_loader = PyGDataLoader(train_dataset, batch_size=CONFIG['BATCH_SIZE'], shuffle=True,
+                                 num_workers=CONFIG['NUM_WORKERS'])
+    val_loader = PyGDataLoader(val_dataset, batch_size=CONFIG['BATCH_SIZE'], shuffle=False,
+                               num_workers=CONFIG['NUM_WORKERS'])
 
-    val_loader = PyGDataLoader(
-        val_dataset,
-        batch_size=CONFIG['BATCH_SIZE'],
-        shuffle=False,
-        num_workers=CONFIG['NUM_WORKERS']
-    )
-
-    # 3. Initialize Model
+    # 4. Initialize Model
+    # node_dim=41 (from v2 update), edge_dim=6
     model = BioGuardGAT(
-        node_dim=22,
+        node_dim=41,
         edge_dim=6,
         embedding_dim=128,
         heads=4
@@ -134,108 +198,57 @@ def run_training(split_type='pair_disjoint'):
     optimizer = optim.Adam(model.parameters(), lr=CONFIG['LEARNING_RATE'])
     criterion = nn.BCEWithLogitsLoss()
 
-    # 4. Training Loop
+    # 5. Training Loop
     best_val_loss = float('inf')
     patience_counter = 0
 
     print("\nStarting training loop...")
     for epoch in range(CONFIG['EPOCHS']):
-        # --- TRAIN ---
         model.train()
         train_loss = 0
 
-        # This loop will now be very fast
-        for batch_a, batch_b, batch_y in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{CONFIG['EPOCHS']}"):
-            batch_a = batch_a.to(device)
-            batch_b = batch_b.to(device)
-            batch_y = batch_y.to(device).unsqueeze(1)
+        for batch_a, batch_b, batch_y in tqdm(train_loader, desc=f"Epoch {epoch + 1}"):
+            batch_a, batch_b, batch_y = batch_a.to(device), batch_b.to(device), batch_y.to(device).unsqueeze(1)
 
             optimizer.zero_grad()
             logits = model(batch_a, batch_b)
             loss = criterion(logits, batch_y)
             loss.backward()
             optimizer.step()
-
             train_loss += loss.item()
 
         avg_train_loss = train_loss / len(train_loader)
 
-        # --- VALIDATE ---
         model.eval()
         val_loss = 0
-        y_true_val = []
-        y_probs_val = []
-
         with torch.no_grad():
             for batch_a, batch_b, batch_y in val_loader:
-                batch_a = batch_a.to(device)
-                batch_b = batch_b.to(device)
-                batch_y = batch_y.to(device).unsqueeze(1)
-
+                batch_a, batch_b, batch_y = batch_a.to(device), batch_b.to(device), batch_y.to(device).unsqueeze(1)
                 logits = model(batch_a, batch_b)
-                loss = criterion(logits, batch_y)
-                val_loss += loss.item()
-
-                probs = torch.sigmoid(logits).cpu().numpy()
-                y_true_val.extend(batch_y.cpu().numpy())
-                y_probs_val.extend(probs)
+                val_loss += criterion(logits, batch_y).item()
 
         avg_val_loss = val_loss / len(val_loader)
+        print(f"Epoch {epoch + 1}: Train={avg_train_loss:.4f}, Val={avg_val_loss:.4f}")
 
-        print(f"Epoch {epoch + 1}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}")
-
-        # --- CHECKPOINTING ---
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
             torch.save(model.state_dict(), os.path.join(ARTIFACT_DIR, 'model.pt'))
-
-            y_true_val = np.array(y_true_val).flatten()
-            y_probs_val = np.array(y_probs_val).flatten()
-            np.savez(
-                os.path.join(ARTIFACT_DIR, 'calibration_data.npz'),
-                y_true=y_true_val,
-                y_prob=y_probs_val
-            )
         else:
             patience_counter += 1
             if patience_counter >= CONFIG['PATIENCE']:
-                print(f"Early stopping triggered after {epoch + 1} epochs.")
+                print("Early stopping.")
                 break
 
-    # 5. Calibration
-    print("\nTraining complete. Calibrating...")
-    calib_data = np.load(os.path.join(ARTIFACT_DIR, 'calibration_data.npz'))
-    y_true_val = calib_data['y_true']
-    y_probs_val = calib_data['y_prob']
-
-    iso = IsotonicRegression(out_of_bounds='clip')
-    iso.fit(y_probs_val, y_true_val)
-    dump(iso, os.path.join(ARTIFACT_DIR, 'calibrator.joblib'))
-
-    y_calibrated = iso.transform(y_probs_val)
-    precision, recall, thresholds = precision_recall_curve(y_true_val, y_calibrated)
-
-    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
-    optimal_idx = np.argmax(f1_scores)
-    optimal_threshold = thresholds[optimal_idx] if optimal_idx < len(thresholds) else 0.5
-
-    print(f"Optimal threshold: {optimal_threshold:.4f} (F1={f1_scores[optimal_idx]:.4f})")
-
+    # 6. Metadata
     metadata = {
-        'version': f'2.0-GAT-{split_type}',
-        'split_type': split_type,
+        'version': f'3.0-{args.split}',
         'config': CONFIG,
-        'threshold': float(optimal_threshold),
         'model_type': 'GAT',
-        'best_val_loss': float(best_val_loss),
-        'split_info': {
-            'train_size': len(train_df),
-            'val_size': len(val_df),
-            'test_size': len(test_df)
-        }
+        'node_dim': 41,
+        'split_type': args.split,
+        'best_val_loss': float(best_val_loss)
     }
-
     with open(os.path.join(ARTIFACT_DIR, 'metadata.json'), 'w') as f:
         json.dump(metadata, f, indent=2)
 
@@ -243,4 +256,9 @@ def run_training(split_type='pair_disjoint'):
 
 
 if __name__ == "__main__":
-    run_training()
+    parser = argparse.ArgumentParser(description="Train BioGuardGAT")
+    parser.add_argument('--split', type=str, default='cold', choices=['random', 'cold', 'scaffold'],
+                        help="Data split strategy: 'random' (easy), 'cold' (hard), 'scaffold' (generalize to new chemical families)")
+    args = parser.parse_args()
+
+    run_training(args)

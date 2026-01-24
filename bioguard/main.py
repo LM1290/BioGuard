@@ -3,19 +3,11 @@ BioGuard - Drug-Drug Interaction Prediction System
 Main entry point for training, evaluation, and serving.
 
 Usage:
-    python -m bioguard.main [command] [options]
-
-Examples:
-    python -m bioguard.main train
-    python -m bioguard.main eval
-    python -m bioguard.main baselines
-    python -m bioguard.main compare
-    python -m bioguard.main serve
+    python -m bioguard.main [command] --split [random|cold|scaffold]
 """
 
 import sys
 import argparse
-import uvicorn
 import logging
 
 # Configure logging
@@ -23,7 +15,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -33,46 +24,45 @@ def main():
 
     parser.add_argument(
         'command',
-        choices=['train', 'eval', 'baselines', 'compare', 'serve', 'validate'],
+        choices=['train', 'eval', 'baselines', 'compare', 'serve'],
         help='Command to run'
+    )
+
+    # Series B: Added split strategy control
+    parser.add_argument(
+        '--split',
+        type=str,
+        default='cold',
+        choices=['random', 'cold', 'scaffold'],
+        help="Data split strategy: 'random' (easy), 'cold' (strict), 'scaffold' (hardest)"
     )
 
     args = parser.parse_args()
 
     if args.command == "train":
         from .train import run_training
-        run_training(split_type='pair_disjoint')
+        # Pass the whole args object so train.py can see flags
+        run_training(args)
 
     elif args.command == "eval":
         from .evaluate import evaluate_model
-        evaluate_model(split_type='pair_disjoint')
+        evaluate_model(override_split=args.split)
 
     elif args.command == "baselines":
-        from .baselines import run_all_baselines
-        run_all_baselines(split_type='pair_disjoint')
+        from .baselines import run_baselines
+        run_baselines(args)
 
     elif args.command == "compare":
         from .compare import main as compare_main
-        compare_main(split_type='pair_disjoint')
-
-    elif args.command == "validate":
-        import os
-        validate_data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'validate_data.py')
-        if os.path.exists(validate_data_path):
-            import subprocess
-            result = subprocess.run([sys.executable, validate_data_path], capture_output=False)
-            sys.exit(result.returncode)
-        else:
-            print("validate_data.py not found")
-            sys.exit(1)
+        compare_main()
 
     elif args.command == "serve":
-        # Use workers=1 because we use an internal ProcessPoolExecutor
+        import uvicorn
         print("="*60)
         print("Starting BioGuard API Server")
         print("="*60)
-        print("IMPORTANT: Running with workers=1 (internal process pool active)")
-        print("For production, use external load balancer + multiple single-worker instances")
+        print("IMPORTANT: Graph Neural Network Inference Mode")
+        print("Running with workers=1 (ProcessPoolExecutor handles parallelism)")
         print("="*60 + "\n")
 
         uvicorn.run(

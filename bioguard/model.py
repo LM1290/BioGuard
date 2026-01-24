@@ -5,7 +5,8 @@ from torch_geometric.nn import GATv2Conv, global_mean_pool
 
 
 class BioGuardGAT(nn.Module):
-    def __init__(self, node_dim=22, edge_dim=6, embedding_dim=128, heads=4):
+    # UPDATED: node_dim bumped to 41 to account for expanded atoms + chirality
+    def __init__(self, node_dim=41, edge_dim=6, embedding_dim=128, heads=4):
         super().__init__()
 
         # --- 1. Graph Encoder ---
@@ -15,7 +16,7 @@ class BioGuardGAT(nn.Module):
             embedding_dim,
             heads=heads,
             dropout=0.2,
-            edge_dim=edge_dim  # <--- Critical: Allow edge features
+            edge_dim=edge_dim
         )
 
         # Layer 2: Refines embeddings
@@ -24,11 +25,10 @@ class BioGuardGAT(nn.Module):
             embedding_dim,
             heads=1,
             dropout=0.2,
-            edge_dim=edge_dim  # <--- Pass edge features here too
+            edge_dim=edge_dim
         )
 
         # --- 2. Symmetric Interaction Head ---
-        # (Sum) + (Diff) + (Prod) -> 3 * embedding_dim
         self.classifier_input_dim = embedding_dim * 3
 
         self.fc1 = nn.Linear(self.classifier_input_dim, 256)
@@ -40,7 +40,6 @@ class BioGuardGAT(nn.Module):
         """Encodes a single drug graph into a vector."""
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
 
-        # Pass edge_attr to conv layers
         x = self.conv1(x, edge_index, edge_attr=edge_attr)
         x = F.elu(x)
 
@@ -61,7 +60,6 @@ class BioGuardGAT(nn.Module):
         vec_b = self.forward_one_arm(data_b)
 
         # 2. Symmetric Combination
-        # (A+B) ⊕ |A-B| ⊕ (A*B)
         diff = torch.abs(vec_a - vec_b)
         combined = torch.cat([vec_a + vec_b, diff, vec_a * vec_b], dim=1)
 

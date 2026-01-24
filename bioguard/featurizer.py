@@ -1,8 +1,6 @@
 """
 Molecular featurization module.
-Contains BOTH:
-1. BioFeaturizer (Fingerprints) -> For Baselines
-2. GraphFeaturizer (Graphs) -> For BioGuardGAT
+
 """
 
 import numpy as np
@@ -12,7 +10,6 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator, Descriptors, rdchem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 from torch_geometric.data import Data
-
 
 # --- 1. LEGACY FEATURIZER (FOR BASELINES) ---
 class BioFeaturizer:
@@ -45,8 +42,15 @@ class BioFeaturizer:
 # --- 2. NEW GRAPH FEATURIZER (FOR GAT) ---
 class GraphFeaturizer:
     def __init__(self):
-        # Atoms: C N O S F Cl Br I P
-        self.atom_types = ['C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'I', 'P']
+        # 1. Expanded Atom List (Periodic Table Rows 2-4 + Common Metals)
+        # We explicitly include an 'UNK' token at the end.
+        self.atom_types = [
+            'C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'I', 'P',
+            'B', 'Si', 'Se', 'Na', 'K', 'Mg', 'Ca',
+            'Fe', 'Zn', 'Mn', 'Cu', 'Co', 'Ni', 'As',
+            'UNK'
+        ]
+
         self.hybridization = [
             rdchem.HybridizationType.SP,
             rdchem.HybridizationType.SP2,
@@ -55,18 +59,34 @@ class GraphFeaturizer:
             rdchem.HybridizationType.SP3D2
         ]
 
-        # Node dim: 9 (types) + 6 (degrees) + 5 (hybrid) + 1 (aromatic) + 1 (formal charge) = 22
-        self.node_dim = 22
+        self.chiral_types = [
+            rdchem.ChiralType.CHI_UNSPECIFIED,
+            rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
+            rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
+            rdchem.ChiralType.CHI_OTHER
+        ]
+
+        # Node dim calculation:
+        # Atom Types (24) + Degree (6) + Hybrid (5) + Aromatic (1) + Charge (1) + Chiral (4)
+        # Total = 41
+        self.node_dim = len(self.atom_types) + 6 + len(self.hybridization) + 1 + 1 + len(self.chiral_types)
+
         # Edge dim: 4 (Bond types) + 1 (Conjugated) + 1 (InRing) = 6
         self.edge_dim = 6
 
     def _one_hot(self, x, allowable_set):
-        if x not in allowable_set: x = allowable_set[-1]
+        """
+        Maps x to the one-hot vector.
+        Safe Mode: If x is not in allowable_set, maps to the LAST element (UNK).
+        """
+        if x not in allowable_set:
+            x = allowable_set[-1] # Maps to 'UNK' or last element
         return list(map(lambda s: x == s, allowable_set))
 
     def smiles_to_graph(self, smiles):
         mol = Chem.MolFromSmiles(smiles)
         if not mol:
+            # Return empty graph with correct dimensions
             return Data(
                 x=torch.zeros((1, self.node_dim)),
                 edge_index=torch.empty((2, 0), dtype=torch.long),
@@ -81,7 +101,8 @@ class GraphFeaturizer:
                     self._one_hot(atom.GetDegree(), [0, 1, 2, 3, 4, 5]) +
                     self._one_hot(atom.GetHybridization(), self.hybridization) +
                     [1 if atom.GetIsAromatic() else 0] +
-                    [atom.GetFormalCharge()]
+                    [atom.GetFormalCharge()] +
+                    self._one_hot(atom.GetChiralTag(), self.chiral_types) # <--- Added Chirality
             )
             x.append(features)
         x = torch.tensor(x, dtype=torch.float)
