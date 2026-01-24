@@ -48,10 +48,11 @@ python -m bioguard.main train --split scaffold
 
 Evaluation performed on the TWOSIDES dataset using Scaffold-Disjoint Splitting.
 
-| Model Architecture | Split Type | ROC-AUC | Analysis |
-| :--- | :--- | :--- | :--- |
+| Model Architecture | Split Type | ROC-AUC | Analysis                                                                          |
+| :--- | :--- | :--- |:----------------------------------------------------------------------------------|
 | **GAT (Graph Attention)** | Scaffold | **0.650** | Demonstrates superior generalization to novel scaffolds compared to fingerprints. |
-| **MLP (ECFP4 Baseline)** | Scaffold | 0.570 | Fingerprints degrade significantly when testing on unseen structural classes. |
+| **MLP (ECFP4 Baseline)** | Scaffold | 0.570 | Fingerprints degrade significantly when testing on unseen structural classes.     |
+| **LightGBM (Gradient Boost Baseline)** | Scaffold | 0.548 | Fingerprints fail on novel chemistry, similar to MLP.                             |
 Technical Note: The GAT architecture exhibits higher variance during training due to data scarcity (~60k pairs). Future development will focus on integrating pre-trained molecular embeddings (e.g., ChemBERTa or Grover) to stabilize weights during fine-tuning.
 
 ## Citation & Contact
