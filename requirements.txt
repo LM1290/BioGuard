@@ -1,6 +1,11 @@
 # Core ML/DL frameworks
 torch==2.1.0
 numpy==1.26.4
+torch-geometric>=2.3.0
+torch-scatter
+torch-sparse
+torch-cluster
+torch-spline-conv
 
 # Chemistry/Cheminformatics
 rdkit==2023.9.6
