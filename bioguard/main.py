@@ -37,7 +37,7 @@ def main():
         help="Data split strategy: 'random' (easy), 'cold' (strict), 'scaffold' (hardest)"
     )
 
-    # --- ADDED TRAINING ARGUMENTS ---
+    # --- TRAINING ARGUMENTS ---
     parser.add_argument(
         '--batch_size',
         type=int,
@@ -57,6 +57,14 @@ def main():
         type=float,
         default=1e-4,
         help='Learning rate for optimizer'
+    )
+
+    # --- BASELINE ARGUMENTS ---
+    # FIX: Added this missing argument so baselines.py doesn't crash
+    parser.add_argument(
+        '--quick',
+        action='store_true',
+        help='Skip slow ML baselines (LR/RF) and run only Tanimoto'
     )
     # --------------------------------
 

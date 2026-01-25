@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# 1. Import global_max_pool
 from torch_geometric.nn import GATv2Conv, global_mean_pool, global_max_pool
 
 
@@ -27,16 +26,18 @@ class BioGuardGAT(nn.Module):
         )
 
         # --- 2. Symmetric Interaction Head ---
-        # UPDATED DIMENSION CALCULATION:
-        # We now use Mean + Max pooling, so the vector size doubles (128 -> 256).
-        # Then we do the 3 symmetric operations (Sum, Diff, Prod).
-        # So input dim is: (embedding_dim * 2) * 3 = embedding_dim * 6
+        # Input dim: (embedding_dim * 2 (Mean+Max)) * 3 (Sym Ops)
         self.classifier_input_dim = (embedding_dim * 2) * 3
 
         self.fc1 = nn.Linear(self.classifier_input_dim, 256)
         self.bn1 = nn.BatchNorm1d(256)
         self.fc2 = nn.Linear(256, 64)
         self.out = nn.Linear(64, 1)
+
+    @property
+    def device(self):
+        """Dynamic device property to check where the model weights are."""
+        return next(self.parameters()).device
 
     def forward_one_arm(self, data):
         """Encodes a single drug graph into a vector."""
@@ -48,11 +49,11 @@ class BioGuardGAT(nn.Module):
         x = self.conv2(x, edge_index, edge_attr=edge_attr)
         x = F.elu(x)
 
-        # UPDATED POOLING STRATEGY
+        # Pooling: Mean + Max
         x_mean = global_mean_pool(x, batch)
         x_max = global_max_pool(x, batch)
 
-        # Concatenate: [Batch, 128] + [Batch, 128] -> [Batch, 256]
+        # Concatenate: [Batch, 256]
         x = torch.cat([x_mean, x_max], dim=1)
 
         return x

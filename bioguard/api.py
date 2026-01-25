@@ -1,8 +1,8 @@
 """
 BioGuard DDI Prediction API
-UPDATED: v2.0 (GNN Support)
-- Handles Graph Neural Network inference
-- Implements correct CPU-bound graph featurization in workers
+UPDATED: v2.1 (Dynamic Device Support)
+- Auto-detects CUDA/CPU
+- Moves input tensors to correct device automatically
 """
 
 import torch
@@ -76,13 +76,13 @@ def run_cpu_featurization(smiles_a, smiles_b):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing BioGuard API v2.0 (GNN Mode)...")
+    logger.info("Initializing BioGuard API v2.1 (Dynamic Device)...")
 
     # 1. Setup Workers
     app.state.executor = ProcessPoolExecutor(max_workers=2, initializer=worker_init)
 
     # 2. Load Model Configuration
-    node_dim = 41  # Default Series B dimension
+    node_dim = 41
     threshold = 0.5
 
     if os.path.exists(META_PATH):
@@ -95,13 +95,19 @@ async def lifespan(app: FastAPI):
         except:
             logger.warning("Metadata load failed, using defaults.")
 
-    # 3. Initialize Model
-    device = torch.device("cpu")  # Inference on CPU usually fine for single requests
+    # 3. Initialize Model with DYNAMIC DEVICE
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_str)
+    logger.info(f"Inference Device: {device_str.upper()}")
+
+    app.state.device = device # Store device in state for request handling
+
     model = BioGuardGAT(node_dim=node_dim, embedding_dim=128, heads=4).to(device)
 
     if os.path.exists(MODEL_PATH):
         try:
-            model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+            # map_location ensures weights load correctly even if trained on different device
+            model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
             model.eval()
             app.state.model = model
             app.state.model_ready = True
@@ -124,7 +130,7 @@ async def lifespan(app: FastAPI):
     app.state.executor.shutdown()
 
 
-app = FastAPI(title="BioGuard API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="BioGuard API", version="2.1", lifespan=lifespan)
 
 
 class PredictionRequest(BaseModel):
@@ -144,7 +150,7 @@ async def predict(req: PredictionRequest, request: Request):
     if not st.model_ready:
         raise HTTPException(status_code=503, detail="Model not initialized")
 
-    # 1. Offload Featurization
+    # 1. Offload Featurization (CPU Bound)
     loop = asyncio.get_running_loop()
     res = await loop.run_in_executor(
         st.executor,
@@ -156,7 +162,7 @@ async def predict(req: PredictionRequest, request: Request):
     if not res['success']:
         raise HTTPException(status_code=400, detail=res['error'])
 
-    # 2. Reconstruct Graphs (Main Thread)
+    # 2. Reconstruct Graphs & MOVE TO DEVICE
     try:
         def dict_to_data(d):
             return Data(
@@ -169,8 +175,9 @@ async def predict(req: PredictionRequest, request: Request):
         data_b = dict_to_data(res['graph_b'])
 
         # Create Batch (Size 1)
-        batch_a = Batch.from_data_list([data_a])
-        batch_b = Batch.from_data_list([data_b])
+        # IMPORTANT: .to(st.device) moves the batch to GPU if available
+        batch_a = Batch.from_data_list([data_a]).to(st.device)
+        batch_b = Batch.from_data_list([data_b]).to(st.device)
 
         # 3. Inference
         with torch.no_grad():
