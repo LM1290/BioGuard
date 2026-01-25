@@ -14,7 +14,7 @@ This repository implements a production-grade inference engine to benchmark **Gr
 ## Reproducibility
 * Docker
 ```
-git clone -b feature/mpnn-integration https://github.com/LM1290/BioGuard.git
+git clone https://github.com/LM1290/BioGuard.git
 docker build -t bioguard_app .
 python -m bioguard.main serve
 ```
