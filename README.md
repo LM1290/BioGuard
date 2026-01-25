@@ -12,19 +12,21 @@ This repository implements a production-grade inference engine to benchmark **Gr
 
 ---
 ## Reproducibility
-* Dependencies
+* Docker
 ```
-pip install torch_geometric
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-{torch.__version__}.html
+git clone -b feature/mpnn-integration https://github.com/LM1290/BioGuard.git
+docker build -t bioguard_app .
+python -m bioguard.main serve
+```
+
+* Run Model/train
+```
 pip install -r requirements_training.txt
-```
-* Run Model
-```
 python -m validate_data
 python -m bioguard.main train
 python -m bioguard.main --mode evaluate
+python -m bioguard.train_lgbm 
 ```
-* Docker Support Coming Soon
 ## Benchmarks (Strict Scaffold Split)
 
 Evaluation performed on a held-out test set comprising entirely unseen molecular scaffolds. The test set maintains a realistic 1:3 positive-to-negative ratio to penalize false positives.
