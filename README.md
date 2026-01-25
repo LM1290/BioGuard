@@ -31,11 +31,11 @@ python -m bioguard.train_lgbm
 
 Evaluation performed on a held-out test set comprising entirely unseen molecular scaffolds. The test set maintains a realistic 1:3 positive-to-negative ratio to penalize false positives.
 
-| Model | Input | ROC-AUC | PR-AUC | Observation |
-| :--- | :--- | :--- | :--- | :--- |
-| **LightGBM (Baseline)** | ECFP4 (1024-bit) | **0.72** | 0.31 | **Current SOTA.** Explicit substructure hashing retains signal even on novel scaffolds. |
-| **BioGuard GATv2** | Graph Topology | 0.58 | **0.35** | **Negative Result.** Attention mechanism struggled to generalize SAR to unseen topologies, likely due to data starvation or over-smoothing. |
-| **MLP** | ECFP4 (1024-bit) | 0.58 | 0.32 | **Non-linear baseline.** Fails to capture interactions as effectively as tree-based logic. |
+| Model | Input | ROC-AUC  | PR-AUC   | Observation |
+| :--- | :--- |:---------|:---------| :--- |
+| **LightGBM (Baseline)** | ECFP4 (1024-bit) | **0.72** | 0.31     | **Current SOTA.** Explicit substructure hashing retains signal even on novel scaffolds. |
+| **BioGuard GATv2** | Graph Topology | 0.639    | **0.37** | **Negative Result.** Attention mechanism struggled to generalize SAR to unseen topologies, likely due to data starvation or over-smoothing. |
+| **MLP** | ECFP4 (1024-bit) | 0.58     | 0.32     | **Non-linear baseline.** Fails to capture interactions as effectively as tree-based logic. |
 
 ---
 

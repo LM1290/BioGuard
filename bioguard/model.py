@@ -1,35 +1,37 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATv2Conv, global_mean_pool
+# 1. Import global_max_pool
+from torch_geometric.nn import GATv2Conv, global_mean_pool, global_max_pool
 
 
 class BioGuardGAT(nn.Module):
-    # UPDATED: node_dim bumped to 41 to account for expanded atoms + chirality
     def __init__(self, node_dim=41, edge_dim=6, embedding_dim=128, heads=4):
         super().__init__()
 
         # --- 1. Graph Encoder ---
-        # Layer 1: Takes node features + edge features
         self.conv1 = GATv2Conv(
             node_dim,
             embedding_dim,
             heads=heads,
-            dropout=0.2,
+            dropout=0.4,
             edge_dim=edge_dim
         )
 
-        # Layer 2: Refines embeddings
         self.conv2 = GATv2Conv(
             embedding_dim * heads,
             embedding_dim,
             heads=1,
-            dropout=0.2,
+            dropout=0.3,
             edge_dim=edge_dim
         )
 
         # --- 2. Symmetric Interaction Head ---
-        self.classifier_input_dim = embedding_dim * 3
+        # UPDATED DIMENSION CALCULATION:
+        # We now use Mean + Max pooling, so the vector size doubles (128 -> 256).
+        # Then we do the 3 symmetric operations (Sum, Diff, Prod).
+        # So input dim is: (embedding_dim * 2) * 3 = embedding_dim * 6
+        self.classifier_input_dim = (embedding_dim * 2) * 3
 
         self.fc1 = nn.Linear(self.classifier_input_dim, 256)
         self.bn1 = nn.BatchNorm1d(256)
@@ -46,7 +48,13 @@ class BioGuardGAT(nn.Module):
         x = self.conv2(x, edge_index, edge_attr=edge_attr)
         x = F.elu(x)
 
-        x = global_mean_pool(x, batch)
+        # UPDATED POOLING STRATEGY
+        x_mean = global_mean_pool(x, batch)
+        x_max = global_max_pool(x, batch)
+
+        # Concatenate: [Batch, 128] + [Batch, 128] -> [Batch, 256]
+        x = torch.cat([x_mean, x_max], dim=1)
+
         return x
 
     def forward(self, data_a, data_b):

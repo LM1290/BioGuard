@@ -3,7 +3,7 @@ BioGuard - Drug-Drug Interaction Prediction System
 Main entry point for training, evaluation, and serving.
 
 Usage:
-    python -m bioguard.main [command] --split [random|cold|scaffold]
+    python -m bioguard.main [command] --split [random|cold|scaffold] --batch_size 128
 """
 
 import sys
@@ -36,6 +36,29 @@ def main():
         choices=['random', 'cold', 'scaffold'],
         help="Data split strategy: 'random' (easy), 'cold' (strict), 'scaffold' (hardest)"
     )
+
+    # --- ADDED TRAINING ARGUMENTS ---
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=128,
+        help='Batch size for training and evaluation'
+    )
+
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=50,
+        help='Number of training epochs'
+    )
+
+    parser.add_argument(
+        '--lr',
+        type=float,
+        default=1e-4,
+        help='Learning rate for optimizer'
+    )
+    # --------------------------------
 
     args = parser.parse_args()
 

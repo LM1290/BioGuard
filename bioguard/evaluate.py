@@ -14,9 +14,8 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 
 from .model import BioGuardGAT
 from .data_loader import load_twosides_data
+# Import BioDataset from train so we use the exact same logic (and GraphFeaturizer)
 from bioguard.train import BioDataset
-# Import all split functions to support whatever was used in training
-
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'artifacts')
 MODEL_PATH = os.path.join(ARTIFACT_DIR, 'model.pt')
@@ -39,7 +38,7 @@ def evaluate_model(override_split=None):
     meta = load_metadata()
 
     # Detect training configuration
-    train_node_dim = meta.get('node_dim', 41)  # Default to 41 (Series B) if missing, or 22 (Legacy)
+    train_node_dim = meta.get('node_dim', 41)
     train_split = meta.get('split_type', 'cold')
     threshold = meta.get('threshold', 0.5)
 
@@ -54,17 +53,20 @@ def evaluate_model(override_split=None):
 
     # 2. Load Data
     print("\nLoading data...")
-    print(f"Loading test set from pre-computed {args.split} split...")
-    df = load_twosides_data()
+    # FIX 1: Use 'split_type' variable instead of undefined 'args.split'
+    print(f"Loading test set from pre-computed {split_type} split...")
+
+    # FIX 2: Pass the split method to the loader!
+    # Otherwise it defaults to 'scaffold' regardless of what you asked for.
+    df = load_twosides_data(split_method=split_type)
 
     # We strictly trust the loader now.
-    # If you ran the loader in 'scaffold' mode, this returns the scaffold test set.
     test_df = df[df['split'] == 'test']
 
     if len(test_df) == 0:
         raise ValueError("Test set is empty! Check if data_loader generated splits correctly.")
+
     # 3. Initialize Model & Load Weights
-    # CRITICAL: Use the node_dim found in metadata
     model = BioGuardGAT(
         node_dim=train_node_dim,
         embedding_dim=128,
@@ -76,14 +78,13 @@ def evaluate_model(override_split=None):
         sys.exit(1)
 
     try:
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
         model.eval()
         print("[OK] Model weights loaded successfully")
     except RuntimeError as e:
         print(f"\n[FATAL ERROR] Weight mismatch!")
         print(f"The saved model and the code definition do not match.")
         print(f"Error details: {e}")
-        print("Fix: Ensure 'node_dim' in evaluate.py matches 'node_dim' used in train.py.")
         sys.exit(1)
 
     # 4. Load Calibrator
@@ -93,7 +94,7 @@ def evaluate_model(override_split=None):
         print("[OK] Calibrator loaded")
 
     # 5. Inference Loop
-    test_dataset = BioDataset(test_df)
+    test_dataset = BioDataset(test_df, name="Test")
     test_loader = PyGDataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=0)
 
     print("\nRunning inference...")
