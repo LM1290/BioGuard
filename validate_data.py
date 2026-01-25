@@ -12,7 +12,7 @@ import numpy as np
 from collections import Counter
 
 from bioguard.data_loader import load_twosides_data
-from bioguard.train import get_pair_disjoint_split
+
 
 
 def canonicalize_pair(drug_a, drug_b):
@@ -73,7 +73,9 @@ def validate_dataset():
     
     # Create splits and validate
     print("\n4. Creating pair-disjoint splits...")
-    train_df, val_df, test_df = get_pair_disjoint_split(df, seed=42)
+    train_df = df[df['split'] == 'train']
+    val_df = df[df['split'] == 'val']
+    test_df = df[df['split'] == 'test']
     
     print(f"   Train: {len(train_df)} pairs")
     print(f"   Val:   {len(val_df)} pairs")

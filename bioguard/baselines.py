@@ -36,7 +36,6 @@ from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit import RDLogger
 
 # Import splits from train.py to ensure identical data processing
-from .train import get_pair_disjoint_split, get_cold_drug_split, get_scaffold_split
 from .data_loader import load_twosides_data
 from .featurizer import BioFeaturizer
 
@@ -214,18 +213,13 @@ def run_baselines(args):
     print(f"--- BioGuard Baselines ({args.split.upper()} Split) ---")
 
     # 1. Load & Split Data
+    print("Loading data for baselines...")
     df = load_twosides_data()
 
-    if args.split == 'random':
-        train_df, val_df, test_df = get_pair_disjoint_split(df)
-    elif args.split == 'cold':
-        train_df, val_df, test_df = get_cold_drug_split(df)
-    elif args.split == 'scaffold':
-        train_df, val_df, test_df = get_scaffold_split(df)
-    else:
-        raise ValueError("Invalid split")
+    train_df = df[df['split'] == 'train']
+    test_df = df[df['split'] == 'test']
 
-    print(f"Test Set Size: {len(test_df)}")
+    print(f"Baseline Data: Train={len(train_df)}, Test={len(test_df)}")
 
     # 2. Pre-compute Cache for Tanimoto
     # Gather all unique SMILES from the TEST set (we don't need train/val for Tanimoto)

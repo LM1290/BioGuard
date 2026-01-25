@@ -14,8 +14,9 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 
 from .model import BioGuardGAT
 from .data_loader import load_twosides_data
+from bioguard.train import BioDataset
 # Import all split functions to support whatever was used in training
-from .train import get_pair_disjoint_split, get_cold_drug_split, get_scaffold_split, BioDataset
+
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'artifacts')
 MODEL_PATH = os.path.join(ARTIFACT_DIR, 'model.pt')
@@ -53,24 +54,15 @@ def evaluate_model(override_split=None):
 
     # 2. Load Data
     print("\nLoading data...")
+    print(f"Loading test set from pre-computed {args.split} split...")
     df = load_twosides_data()
 
-    # Select the correct split function
-    if split_type == 'random' or split_type == 'pair_disjoint':
-        _, _, test_df = get_pair_disjoint_split(df)
-    elif split_type == 'cold':
-        _, _, test_df = get_cold_drug_split(df)
-    elif split_type == 'scaffold':
-        _, _, test_df = get_scaffold_split(df)
-    else:
-        raise ValueError(f"Unknown split type: {split_type}")
+    # We strictly trust the loader now.
+    # If you ran the loader in 'scaffold' mode, this returns the scaffold test set.
+    test_df = df[df['split'] == 'test']
 
     if len(test_df) == 0:
-        print("ERROR: Empty test set. Cannot evaluate.")
-        sys.exit(0)
-
-    print(f"Test Set Size: {len(test_df)}")
-
+        raise ValueError("Test set is empty! Check if data_loader generated splits correctly.")
     # 3. Initialize Model & Load Weights
     # CRITICAL: Use the node_dim found in metadata
     model = BioGuardGAT(
