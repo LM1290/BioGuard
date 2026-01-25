@@ -1,14 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+# Use the correct Dataset class
+from torch_geometric.data import Dataset as PyGDataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
-from torch_geometric.data import Dataset, Batch
 from sklearn.metrics import precision_score, recall_score
 import argparse
 import os
+import os.path as osp
 import json
 import numpy as np
 from tqdm import tqdm
+import pandas as pd
 
 # Internal Imports
 from bioguard.data_loader import load_twosides_data
@@ -18,78 +21,121 @@ from bioguard.model import BioGuardGAT
 # --- CONFIG ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
+DATA_DIR = os.path.join(BASE_DIR, 'data')
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 
-class BioDataset(Dataset):
-    def __init__(self, df, name='Train'):
-        super().__init__()
-        self.df = df.reset_index(drop=True)
-        self.featurizer = GraphFeaturizer()
-        self.name = name
+class BioGuardDataset(PyGDataset):
+    """
+    On-Disk Dataset to prevent RAM explosion.
+    Featurizes once, saves .pt files, loads lazily.
+    """
 
-        # WARNING: TECHNICAL DEBT BOMB ----------------------------------------
-        # This implementation pre-computes all graphs into RAM.
-        # For large datasets (like full DrugBank), this WILL cause an OOM crash.
-        # TODO: Refactor to on-disk lazy loading (torch_geometric.data.Dataset)
-        # ---------------------------------------------------------------------
-        print(f"[{name}] Pre-computing graphs into RAM...")
-        self.graphs_a = []
-        self.graphs_b = []
-        self.labels = []
+    def __init__(self, root, df=None, split='train', transform=None, pre_transform=None):
+        self.split = split
+        self.df = df
+        # The 'root' will contain /processed/train or /processed/val
+        super().__init__(root, transform, pre_transform)
 
-        for _, row in tqdm(self.df.iterrows(), total=len(df)):
-            g1 = self.featurizer.smiles_to_graph(row['smiles_a'])
-            g2 = self.featurizer.smiles_to_graph(row['smiles_b'])
+    @property
+    def raw_file_names(self):
+        # We handle raw data ingestion via DataFrame, so this can be dummy
+        return []
+
+    @property
+    def processed_dir(self):
+        return osp.join(self.root, 'processed', self.split)
+
+    @property
+    def processed_file_names(self):
+        # We need to know how many files to expect.
+        # If df is None (loading mode), we count files in dir.
+        # If df is provided (creation mode), we use len(df).
+        if self.df is not None:
+            return [f'data_{i}.pt' for i in range(len(self.df))]
+        else:
+            # Fallback for reloading without DF
+            files = [f for f in os.listdir(self.processed_dir) if f.startswith('data_') and f.endswith('.pt')]
+            return sorted(files, key=lambda x: int(x.split('_')[1].split('.')[0]))
+
+    def download(self):
+        # Data is passed via DF, no download needed
+        pass
+
+    def process(self):
+        if self.df is None:
+            print(f"[{self.split}] No DataFrame provided and processing triggered. Assuming data exists.")
+            return
+
+        print(f"[{self.split}] Processing {len(self.df)} graphs to disk (One-time cost)...")
+        os.makedirs(self.processed_dir, exist_ok=True)
+
+        featurizer = GraphFeaturizer()
+
+        for idx, row in tqdm(self.df.iterrows(), total=len(self.df)):
+            g1 = featurizer.smiles_to_graph(row['smiles_a'])
+            g2 = featurizer.smiles_to_graph(row['smiles_b'])
 
             if g1 and g2:
-                self.graphs_a.append(g1)
-                self.graphs_b.append(g2)
-                self.labels.append(row['label'])
-
-        self.labels = torch.tensor(self.labels, dtype=torch.float)
+                # We store pairs in a generic Data object or custom dict-like
+                # PyG Data object doesn't support nested Data well unless we batch carefully.
+                # Better approach: Save them as a simple dictionary or tuple of Data objects
+                # But PyG Dataset expects ONE Data object per file usually.
+                # We will wrap them.
+                data = (g1, g2, torch.tensor(row['label'], dtype=torch.float))
+                torch.save(data, osp.join(self.processed_dir, f'data_{idx}.pt'))
+            else:
+                # Handle failure (empty graph) - simplified for brevity
+                # In prod, we'd probably filter these out before loop
+                pass
 
     def len(self):
-        return len(self.labels)
+        return len(self.processed_file_names)
 
     def get(self, idx):
-        return self.graphs_a[idx], self.graphs_b[idx], self.labels[idx]
+        data = torch.load(osp.join(self.processed_dir, f'data_{idx}.pt'),weights_only=False)
+        return data
 
 
 def run_training(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # 1. Load Data
-    print("Loading TWOSIDES dataset from data_loader...")
+    # 1. Load Data Frame (Lightweight Metadata)
+    print("Loading TWOSIDES metadata...")
     df = load_twosides_data(split_method=args.split)
 
-    train_df = df[df['split'] == 'train']
-    val_df = df[df['split'] == 'val']
+    train_df = df[df['split'] == 'train'].reset_index(drop=True)
+    val_df = df[df['split'] == 'val'].reset_index(drop=True)
 
-    print(f"Final Counts -> Train: {len(train_df)} | Val: {len(val_df)}")
+    # 2. Initialize Disk-Based Datasets
+    # Pass 'root' as the data directory. The class will handle processed/train/ etc.
+    train_dataset = BioGuardDataset(root=DATA_DIR, df=train_df, split='train')
+    val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
-    # 2. Datasets & Loaders
-    train_dataset = BioDataset(train_df, name="Train")
-    val_dataset = BioDataset(val_df, name="Val")
+    # 3. Loaders with Multiprocessing
+    # Now safe to use num_workers because we are loading files, not forking heavy objects
+    num_workers = min(4, os.cpu_count())
+    print(f"Data Loaders initialized with num_workers={num_workers}")
 
-    # num_workers=0 is safer for debugging; increase if stable
-    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
-    # 3. Model Setup
-    sample_graph = train_dataset[0][0]
-    node_dim = sample_graph.x.shape[1]
+    # 4. Model Setup
+    # Fetch dimensions from first graph of first pair
+    sample_data = train_dataset[0]
+    node_dim = sample_data[0].x.shape[1]
 
-    # Save metadata for API/Eval
     with open(os.path.join(ARTIFACT_DIR, 'metadata.json'), 'w') as f:
         json.dump({'node_dim': node_dim}, f)
 
     model = BioGuardGAT(node_dim=node_dim, edge_dim=6).to(device)
 
-    # --- WEIGHTED LOSS CALCULATION ---
-    num_pos = train_dataset.labels.sum().item()
-    num_neg = len(train_dataset) - num_pos
+    # Weighted Loss Setup
+    # Note: We can't sum() the dataset labels cheaply anymore without iteration.
+    # But we have the DataFrame! Use that.
+    num_pos = train_df['label'].sum()
+    num_neg = len(train_df) - num_pos
     pos_weight_val = num_neg / num_pos if num_pos > 0 else 1.0
 
     print(f"Loss Weighting: Neg={num_neg}, Pos={num_pos}, Ratio={pos_weight_val:.2f}")
@@ -97,11 +143,9 @@ def run_training(args):
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
-
-    # FIX: Removed 'verbose=True' which causes TypeError in newer PyTorch
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
-    # 4. Loop
+    # 5. Training Loop
     best_val_loss = float('inf')
     patience = 0
     max_patience = 8
@@ -111,14 +155,18 @@ def run_training(args):
         model.train()
         total_loss = 0
 
-        for batch_a, batch_b, batch_y in tqdm(train_loader, desc=f"Epoch {epoch}", leave=False):
-            batch_a = batch_a.to(device)
-            batch_b = batch_b.to(device)
-            batch_y = batch_y.to(device).unsqueeze(1)
+        for batch_data in tqdm(train_loader, desc=f"Epoch {epoch}", leave=False):
+            # Unpack tuple (g1, g2, label)
+            # PyG DataLoader batches lists of tuples into lists of batches
+            # Actually, standard PyG DataLoader collates Data objects.
+            # Since we return a tuple (g1, g2, y), the loader returns (Batch_g1, Batch_g2, Batch_y)
+
+            batch_a = batch_data[0].to(device)
+            batch_b = batch_data[1].to(device)
+            batch_y = batch_data[2].to(device).unsqueeze(1)
 
             optimizer.zero_grad()
             logits = model(batch_a, batch_b)
-
             loss = criterion(logits, batch_y)
             loss.backward()
             optimizer.step()
@@ -133,10 +181,10 @@ def run_training(args):
         all_labels = []
 
         with torch.no_grad():
-            for batch_a, batch_b, batch_y in val_loader:
-                batch_a = batch_a.to(device)
-                batch_b = batch_b.to(device)
-                batch_y = batch_y.to(device).unsqueeze(1)
+            for batch_data in val_loader:
+                batch_a = batch_data[0].to(device)
+                batch_b = batch_data[1].to(device)
+                batch_y = batch_data[2].to(device).unsqueeze(1)
 
                 logits = model(batch_a, batch_b)
                 loss = criterion(logits, batch_y)
@@ -149,10 +197,8 @@ def run_training(args):
                 all_labels.extend(batch_y.cpu().numpy().flatten())
 
         avg_val_loss = val_loss / len(val_loader)
-
         val_precision = precision_score(all_labels, all_preds, zero_division=0)
         val_recall = recall_score(all_labels, all_preds, zero_division=0)
-
         scheduler.step(avg_val_loss)
 
         print(f"Epoch {epoch}: Train Loss={avg_train_loss:.4f} | Val Loss={avg_val_loss:.4f}")

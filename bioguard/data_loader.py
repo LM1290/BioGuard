@@ -1,6 +1,6 @@
 """
 Data loading and preprocessing module for TWOSIDES DDI dataset.
-UPDATED: v3.5
+UPDATED: v4.0 (Cache Busting & Strict Deduplication)
 """
 
 import pandas as pd
@@ -16,9 +16,10 @@ from sklearn.model_selection import train_test_split
 from collections import defaultdict
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
-# Different cache files for different split methods to prevent collisions
+
+# FIX 1: BUMP VERSION TO v16 TO FORCE REBUILD (Ignore stale v15 files)
 def get_cache_path(split_method):
-    return os.path.join(CACHE_DIR, f'twosides_{split_method}_v15.parquet')
+    return os.path.join(CACHE_DIR, f'twosides_{split_method}_v16_clean.parquet')
 
 def _generate_scaffold(smiles):
     mol = Chem.MolFromSmiles(smiles)
@@ -43,11 +44,9 @@ def _is_valid_smiles(smiles):
 def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random_seed=42, split_method='scaffold'):
     """
     Load TWOSIDES with selectable split method.
-    args:
-        split_method: 'random' (Easy/Baseline) or 'scaffold' (Hard/Strict)
     """
     cache_file = get_cache_path(split_method)
-    
+
     if os.path.exists(cache_file):
         print(f"Loading cached {split_method} data from {cache_file}")
         return pd.read_parquet(cache_file, engine='pyarrow')
@@ -55,6 +54,8 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
     print(f"Processing TWOSIDES ({split_method.upper()} SPLIT)...")
     data = DDI(name='TWOSIDES')
     df_pos = data.get_data()
+
+    print(f"Raw TDC Rows: {len(df_pos)}")
 
     df_pos = df_pos.rename(columns={
         'Drug1_ID': 'drug_a', 'Drug2_ID': 'drug_b',
@@ -80,8 +81,13 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
                                              np.where(mask, df_pos['smiles_a'], df_pos['smiles_b'])
 
     df_pos['label'] = 1.0
+
+    # FIX 2: Explicit Deduplication Report
+    before_dedup = len(df_pos)
     df_pos = df_pos.drop_duplicates(subset=['drug_a', 'drug_b'])
-    
+    after_dedup = len(df_pos)
+    print(f"Collapsed Polypharmacy: {before_dedup} -> {after_dedup} unique pairs")
+
     unique_drugs = pd.concat([
         df_pos[['drug_a', 'smiles_a']].rename(columns={'drug_a': 'id', 'smiles_a': 'smiles'}),
         df_pos[['drug_b', 'smiles_b']].rename(columns={'drug_b': 'id', 'smiles_b': 'smiles'})
@@ -90,19 +96,17 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
     # --- SPLIT LOGIC ---
     if split_method == 'random':
         print("Performing RANDOM Split (Baseline)...")
-        # Simple random split of PAIRS (leakage allowed for baseline)
         train_pos, temp_pos = train_test_split(df_pos, test_size=0.2, random_state=random_seed)
         val_pos, test_pos = train_test_split(temp_pos, test_size=0.5, random_state=random_seed)
-        
+
         train_pos['split'] = 'train'
         val_pos['split'] = 'val'
         test_pos['split'] = 'test'
-        
-        # For random split, 'anchors' and 'background' are everyone
+
         all_ids = list(unique_drugs['id'])
         train_anchors = val_anchors = test_anchors = all_ids
         train_bg = val_bg = test_bg = all_ids
-        
+
     else: # SCAFFOLD
         print("Performing SCAFFOLD Split (Strict)...")
         unique_drugs['scaffold'] = Parallel(n_jobs=-1)(delayed(_generate_scaffold)(s) for s in unique_drugs['smiles'])
@@ -138,8 +142,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
         train_pos['split'] = 'train'
         val_pos['split'] = 'val'
         test_pos['split'] = 'test'
-        
-        # Define restricted pools for negatives
+
         train_anchors = train_bg = list(train_drugs)
         val_anchors = list(val_drugs)
         val_bg = list(train_drugs | val_drugs)
@@ -148,7 +151,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
     # --- NEGATIVE GENERATION ---
     print("Generating Negatives...")
-    
+
     train_neg = _generate_partitioned_negatives(
         train_pos, train_anchors, train_bg, unique_drugs,
         int(len(train_pos) * train_negative_ratio), random_seed, mode='train'
@@ -173,6 +176,12 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
         test_pos, test_neg
     ], axis=0).sample(frac=1, random_state=random_seed).reset_index(drop=True)
 
+    # FIX 3: Safety Net - One final deduplication before save
+    final_len_before = len(df_final)
+    df_final = df_final.drop_duplicates(subset=['drug_a', 'drug_b'])
+    if len(df_final) < final_len_before:
+        print(f"[WARNING] Removed {final_len_before - len(df_final)} duplicates found during merge.")
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     df_final.to_parquet(cache_file, engine='pyarrow')
 
@@ -184,48 +193,41 @@ def _generate_partitioned_negatives(df_pos_subset, anchors, background, all_drug
     Finite Pool Strategy with Deduplication.
     """
     if n_needed == 0: return pd.DataFrame()
-    
-    # 1. Setup
-    anchors = np.array(list(set(anchors))) 
+
+    anchors = np.array(list(set(anchors)))
     background = np.array(list(set(background)))
-    
-    # 2. Generate ALL candidate pairs (Vectorized Meshgrid)
+
     idx_a, idx_b = np.meshgrid(np.arange(len(anchors)), np.arange(len(background)))
     idx_a = idx_a.flatten()
     idx_b = idx_b.flatten()
-    
-    # Filter self-loops
+
     mask_diff = anchors[idx_a] != background[idx_b]
     idx_a = idx_a[mask_diff]
     idx_b = idx_b[mask_diff]
-    
+
     candidates_a = anchors[idx_a]
     candidates_b = background[idx_b]
-    
-    # 3. Canonicalize
+
     swap_mask = candidates_a > candidates_b
     candidates_a[swap_mask], candidates_b[swap_mask] = candidates_b[swap_mask], candidates_a[swap_mask]
-    
-    # 4. DEDUPLICATE (Critical Fix)
+
     cand_keys = pd.Series(candidates_a).astype(str) + "|" + pd.Series(candidates_b).astype(str)
     unique_mask = ~cand_keys.duplicated()
     candidates_a = candidates_a[unique_mask]
     candidates_b = candidates_b[unique_mask]
     cand_keys = cand_keys[unique_mask]
-    
-    # 5. SUBTRACT
+
     pos_keys = set(df_pos_subset['drug_a'].astype(str) + "|" + df_pos_subset['drug_b'].astype(str))
     valid_mask = ~cand_keys.isin(pos_keys)
-    
+
     valid_a = candidates_a[valid_mask]
     valid_b = candidates_b[valid_mask]
-    
+
     num_available = len(valid_a)
     print(f"[{mode}] Available Negatives: {num_available} (Needed: {n_needed})")
-    
-    # 6. Sample
+
     rng = np.random.default_rng(seed)
-    
+
     if num_available <= n_needed:
         if num_available < n_needed:
             print(f"[{mode}] WARNING: Insufficient negatives. Returning ALL available.")
@@ -235,17 +237,16 @@ def _generate_partitioned_negatives(df_pos_subset, anchors, background, all_drug
         chosen_idx = rng.choice(num_available, size=n_needed, replace=False)
         final_a = valid_a[chosen_idx]
         final_b = valid_b[chosen_idx]
-        
-    # 7. Hydrate
+
     id_to_smiles = all_drugs_df.set_index('id')['smiles'].to_dict()
-    
+
     res_df = pd.DataFrame({
         'drug_a': final_a,
         'drug_b': final_b,
         'label': 0.0
     })
-    
+
     res_df['smiles_a'] = res_df['drug_a'].map(id_to_smiles)
     res_df['smiles_b'] = res_df['drug_b'].map(id_to_smiles)
-    
+
     return res_df
