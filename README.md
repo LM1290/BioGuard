@@ -15,8 +15,9 @@ This repository implements a production-grade inference engine to benchmark **Gr
 * Docker
 ```
 git clone https://github.com/LM1290/BioGuard.git
+cd bioguard
 docker build -t bioguard_app .
-python -m bioguard.main serve
+docker run -p 8000:8000 bioguard_app
 ```
 
 * Run Model/train
