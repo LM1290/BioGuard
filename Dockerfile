@@ -2,7 +2,7 @@
 FROM --platform=linux/amd64 mambaorg/micromamba:1.5.3
 
 WORKDIR /app
-.
+
 COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/env.yaml
 
 
