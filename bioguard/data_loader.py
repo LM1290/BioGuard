@@ -187,7 +187,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
     return df_final
 
-
+# TECHNICAL DEBT Note: Works for TWOSIDES due to small size, but need to refactor to a dynamic sparse set.
 def _generate_partitioned_negatives(df_pos_subset, anchors, background, all_drugs_df, n_needed, seed, mode='debug'):
     """
     Finite Pool Strategy with Deduplication.
