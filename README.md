@@ -8,7 +8,8 @@
 
 This repository implements a production-grade inference engine to benchmark **Graph Attention Networks (GATv2)** against tabular baselines (**LightGBM/ECFP4**) on the TWOSIDES dataset. Crucially, this project enforces **Strict Bemis-Murcko Scaffold Splitting** to evaluate Out-of-Distribution (OOD) generalization.
 
-**Key Finding:** Contrary to prevailing literature, structure-aware Graph Neural Networks (**0.58 AUC**) significantly underperformed fingerprint-based Gradient Boosting (**0.72 AUC**) in strict OOD settings. This suggests that for pure small-molecule input, 2D topological embeddings suffer from signal dilution compared to explicit substructure fingerprints when data is sparse.
+**Key Finding:** Contrary to prevailing literature, structure-aware Graph Neural Networks (**0.64 AUC**) significantly underperformed fingerprint-based Gradient Boosting (**0.72 AUC**) in strict OOD settings. This suggests that for pure small-molecule input, 2D topological embeddings suffer from signal dilution compared to explicit substructure fingerprints when data is sparse.
+
 
 ---
 ## Reproducibility
