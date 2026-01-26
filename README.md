@@ -1,6 +1,12 @@
 # BioGuard: Comparative Analysis of Graph vs. Fingerprint Architectures for OOD DDI Prediction
 
-**Status:** Architecture Validation / Negative Result Analysis
+**Status:** Architecture Validation / Negative Result Analysis / V3 IN PROGRESS
+
+        Refactoring: Moving from Siamese/Max-Pooling to Cross-Attention heads to resolve information bottlenecks.
+
+        Optimization: Replacing np.meshgrid in negative sampler to support billion-scale drug-banks (ChEMBL/ZINC).
+
+        Goal: Beat the 0.72 LightGBM baseline by modeling relational pharmacophore interference.
 
 ---
 
