@@ -4,7 +4,7 @@
 
         Refactoring: Moving from Siamese/Max-Pooling to Cross-Attention heads to resolve information bottlenecks.
 
-        Optimization: Replacing np.meshgrid in negative sampler to support billion-scale drug-banks (ChEMBL/ZINC).
+        Fixed (v2.1-memory-fix): Optimization: Replacing np.meshgrid in negative sampler to support billion-scale drug-banks (ChEMBL/ZINC).
 
         Goal: Beat the 0.72 LightGBM baseline by modeling relational pharmacophore interference.
 
