@@ -28,7 +28,7 @@ def main():
         help='Command to run'
     )
 
-    # Series B: Added split strategy control
+    #Added split strategy control
     parser.add_argument(
         '--split',
         type=str,

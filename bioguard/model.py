@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, global_mean_pool, global_max_pool
-
+from bioguard.config import NODE_DIM, EDGE_DIM
 
 class BioGuardGAT(nn.Module):
-    def __init__(self, node_dim=41, edge_dim=6, embedding_dim=128, heads=4):
+    def __init__(self, node_dim=NODE_DIM, edge_dim=EDGE_DIM, embedding_dim=128, heads=4):
         super().__init__()
 
         # --- 1. Graph Encoder ---

@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# Use the correct Dataset class
-from torch_geometric.data import Dataset as PyGDataset
+from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
 from sklearn.metrics import precision_score, recall_score
 import argparse
@@ -17,6 +16,7 @@ import pandas as pd
 from bioguard.data_loader import load_twosides_data
 from bioguard.featurizer import GraphFeaturizer
 from bioguard.model import BioGuardGAT
+from bioguard.config import NODE_DIM
 
 # --- CONFIG ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,76 +25,74 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 
-class BioGuardDataset(PyGDataset):
+class PairData(Data):
     """
-    On-Disk Dataset to prevent RAM explosion.
-    Featurizes once, saves .pt files, loads lazily.
+    Custom Data object to hold a pair of graphs.
+    Allows PyG to batch them correctly using 'follow_batch'.
+    """
+
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == 'edge_index_b':
+            return self.x_b.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
+
+
+class BioGuardDataset(InMemoryDataset):
+    """
+    In-Memory Dataset that loads 100x faster by saving a single collated .pt file.
     """
 
     def __init__(self, root, df=None, split='train', transform=None, pre_transform=None):
         self.split = split
         self.df = df
-        # The 'root' will contain /processed/train or /processed/val
         super().__init__(root, transform, pre_transform)
-
-    @property
-    def raw_file_names(self):
-        # We handle raw data ingestion via DataFrame, so this can be dummy
-        return []
+        self.data, self.slices = torch.load(self.processed_paths[0])
 
     @property
     def processed_dir(self):
+        # Separate processed files by split to avoid overwrites
         return osp.join(self.root, 'processed', self.split)
 
     @property
     def processed_file_names(self):
-        # We need to know how many files to expect.
-        # If df is None (loading mode), we count files in dir.
-        # If df is provided (creation mode), we use len(df).
-        if self.df is not None:
-            return [f'data_{i}.pt' for i in range(len(self.df))]
-        else:
-            # Fallback for reloading without DF
-            files = [f for f in os.listdir(self.processed_dir) if f.startswith('data_') and f.endswith('.pt')]
-            return sorted(files, key=lambda x: int(x.split('_')[1].split('.')[0]))
-
-    def download(self):
-        # Data is passed via DF, no download needed
-        pass
+        return ['data.pt']
 
     def process(self):
         if self.df is None:
             print(f"[{self.split}] No DataFrame provided and processing triggered. Assuming data exists.")
             return
 
-        print(f"[{self.split}] Processing {len(self.df)} graphs to disk (One-time cost)...")
+        print(f"[{self.split}] Processing {len(self.df)} graphs to single file...")
         os.makedirs(self.processed_dir, exist_ok=True)
 
         featurizer = GraphFeaturizer()
+        data_list = []
 
         for idx, row in tqdm(self.df.iterrows(), total=len(self.df)):
             g1 = featurizer.smiles_to_graph(row['smiles_a'])
             g2 = featurizer.smiles_to_graph(row['smiles_b'])
 
             if g1 and g2:
-                # We store pairs in a generic Data object or custom dict-like
-                # PyG Data object doesn't support nested Data well unless we batch carefully.
-                # Better approach: Save them as a simple dictionary or tuple of Data objects
-                # But PyG Dataset expects ONE Data object per file usually.
-                # We will wrap them.
-                data = (g1, g2, torch.tensor(row['label'], dtype=torch.float))
-                torch.save(data, osp.join(self.processed_dir, f'data_{idx}.pt'))
-            else:
-                # Handle failure (empty graph) - simplified for brevity
-                # In prod, we'd probably filter these out before loop
-                pass
+                # Combine into one PairData object
+                data = PairData(
+                    x=g1.x,
+                    edge_index=g1.edge_index,
+                    edge_attr=g1.edge_attr,
+                    x_b=g2.x,
+                    edge_index_b=g2.edge_index,
+                    edge_attr_b=g2.edge_attr,
+                    y=torch.tensor(row['label'], dtype=torch.float)
+                )
+                data_list.append(data)
 
-    def len(self):
-        return len(self.processed_file_names)
+        if self.pre_filter is not None:
+            data_list = [data for data in data_list if self.pre_filter(data)]
 
-    def get(self, idx):
-        data = torch.load(osp.join(self.processed_dir, f'data_{idx}.pt'),weights_only=False)
-        return data
+        if self.pre_transform is not None:
+            data_list = [self.pre_transform(data) for data in data_list]
+
+        # Save one big .pt file
+        torch.save(self.collate(data_list), self.processed_paths[0])
 
 
 def run_training(args):
@@ -108,23 +106,23 @@ def run_training(args):
     train_df = df[df['split'] == 'train'].reset_index(drop=True)
     val_df = df[df['split'] == 'val'].reset_index(drop=True)
 
-    # 2. Initialize Disk-Based Datasets
-    # Pass 'root' as the data directory. The class will handle processed/train/ etc.
+    # 2. Initialize In-Memory Datasets
     train_dataset = BioGuardDataset(root=DATA_DIR, df=train_df, split='train')
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
     # 3. Loaders with Multiprocessing
-    # Now safe to use num_workers because we are loading files, not forking heavy objects
     num_workers = min(4, os.cpu_count())
     print(f"Data Loaders initialized with num_workers={num_workers}")
 
-    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
+    # follow_batch=['x_b'] creates 'x_b_batch' vector for the second graph
+    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                                 num_workers=num_workers, follow_batch=['x_b'])
+    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                               num_workers=num_workers, follow_batch=['x_b'])
 
     # 4. Model Setup
-    # Fetch dimensions from first graph of first pair
-    sample_data = train_dataset[0]
-    node_dim = sample_data[0].x.shape[1]
+    # Use config for dimensions
+    node_dim = NODE_DIM
 
     with open(os.path.join(ARTIFACT_DIR, 'metadata.json'), 'w') as f:
         json.dump({'node_dim': node_dim}, f)
@@ -132,8 +130,6 @@ def run_training(args):
     model = BioGuardGAT(node_dim=node_dim, edge_dim=6).to(device)
 
     # Weighted Loss Setup
-    # Note: We can't sum() the dataset labels cheaply anymore without iteration.
-    # But we have the DataFrame! Use that.
     num_pos = train_df['label'].sum()
     num_neg = len(train_df) - num_pos
     pos_weight_val = num_neg / num_pos if num_pos > 0 else 1.0
@@ -155,15 +151,16 @@ def run_training(args):
         model.train()
         total_loss = 0
 
-        for batch_data in tqdm(train_loader, desc=f"Epoch {epoch}", leave=False):
-            # Unpack tuple (g1, g2, label)
-            # PyG DataLoader batches lists of tuples into lists of batches
-            # Actually, standard PyG DataLoader collates Data objects.
-            # Since we return a tuple (g1, g2, y), the loader returns (Batch_g1, Batch_g2, Batch_y)
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}", leave=False):
+            batch = batch.to(device)
 
-            batch_a = batch_data[0].to(device)
-            batch_b = batch_data[1].to(device)
-            batch_y = batch_data[2].to(device).unsqueeze(1)
+            # Construct Batch objects for the Siamese network
+            # batch.batch is automatically created for 'x'
+            # batch.x_b_batch is created because of follow_batch=['x_b']
+            batch_a = Data(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr, batch=batch.batch)
+            batch_b = Data(x=batch.x_b, edge_index=batch.edge_index_b, edge_attr=batch.edge_attr_b,
+                           batch=batch.x_b_batch)
+            batch_y = batch.y.unsqueeze(1)
 
             optimizer.zero_grad()
             logits = model(batch_a, batch_b)
@@ -181,10 +178,13 @@ def run_training(args):
         all_labels = []
 
         with torch.no_grad():
-            for batch_data in val_loader:
-                batch_a = batch_data[0].to(device)
-                batch_b = batch_data[1].to(device)
-                batch_y = batch_data[2].to(device).unsqueeze(1)
+            for batch in val_loader:
+                batch = batch.to(device)
+
+                batch_a = Data(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr, batch=batch.batch)
+                batch_b = Data(x=batch.x_b, edge_index=batch.edge_index_b, edge_attr=batch.edge_attr_b,
+                               batch=batch.x_b_batch)
+                batch_y = batch.y.unsqueeze(1)
 
                 logits = model(batch_a, batch_b)
                 loss = criterion(logits, batch_y)

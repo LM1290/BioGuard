@@ -17,7 +17,7 @@ from collections import defaultdict
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 
-# FIX 1: BUMP VERSION TO v16 TO FORCE REBUILD (Ignore stale v15 files)
+# Bump version to v16 to force rebuild (Ignore stale v15 files)
 def get_cache_path(split_method):
     return os.path.join(CACHE_DIR, f'twosides_{split_method}_v16_clean.parquet')
 
@@ -82,7 +82,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
     df_pos['label'] = 1.0
 
-    # FIX 2: Explicit Deduplication Report
+    # Explicit Deduplication Report
     before_dedup = len(df_pos)
     df_pos = df_pos.drop_duplicates(subset=['drug_a', 'drug_b'])
     after_dedup = len(df_pos)
@@ -176,7 +176,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
         test_pos, test_neg
     ], axis=0).sample(frac=1, random_state=random_seed).reset_index(drop=True)
 
-    # FIX 3: Safety Net - One final deduplication before save
+    # Safety Net - One final deduplication before save
     final_len_before = len(df_final)
     df_final = df_final.drop_duplicates(subset=['drug_a', 'drug_b'])
     if len(df_final) < final_len_before:
@@ -187,7 +187,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
     return df_final
 
-# TECHNICAL DEBT Note: Works for TWOSIDES due to small size, but need to refactor to a dynamic sparse set.
+# Works for TWOSIDES due to small size, but need to refactor to a dynamic sparse set.
 def _generate_partitioned_negatives(df_pos_subset, anchors, background, all_drugs_df, n_needed, seed, mode='debug'):
     """
     Finite Pool Strategy with Deduplication.
