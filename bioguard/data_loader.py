@@ -1,6 +1,6 @@
 """
 Data loading and preprocessing module for TWOSIDES DDI dataset.
-UPDATED: v4.0 (Cache Busting & Strict Deduplication)
+UPDATED: v5.0 (Enzyme-Ready & Strict Deduplication)
 """
 
 import pandas as pd
@@ -17,9 +17,9 @@ from collections import defaultdict
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 
-# FIX 1: BUMP VERSION TO v16 TO FORCE REBUILD (Ignore stale v15 files)
+# Bump version to v17 to ensure fresh clean build with names preserved
 def get_cache_path(split_method):
-    return os.path.join(CACHE_DIR, f'twosides_{split_method}_v16_clean.parquet')
+    return os.path.join(CACHE_DIR, f'twosides_{split_method}_v17_clean.parquet')
 
 def _generate_scaffold(smiles):
     mol = Chem.MolFromSmiles(smiles)
@@ -72,7 +72,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
     df_pos['smiles_b'] = df_pos['smiles_b'].map(smiles_map)
     df_pos = df_pos.dropna(subset=['smiles_a', 'smiles_b'])
 
-    # 2. Canonicalize
+    # 2. Canonicalize Pair Order (A < B) to prevent duplicates like (A,B) and (B,A)
     print("Canonicalizing pairs...")
     mask = df_pos['drug_a'] > df_pos['drug_b']
     df_pos['drug_a'], df_pos['drug_b'] = np.where(mask, df_pos['drug_b'], df_pos['drug_a']), \
@@ -82,7 +82,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
     df_pos['label'] = 1.0
 
-    # FIX 2: Explicit Deduplication Report
+    # Explicit Deduplication Report
     before_dedup = len(df_pos)
     df_pos = df_pos.drop_duplicates(subset=['drug_a', 'drug_b'])
     after_dedup = len(df_pos)
@@ -176,7 +176,7 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
         test_pos, test_neg
     ], axis=0).sample(frac=1, random_state=random_seed).reset_index(drop=True)
 
-    # FIX 3: Safety Net - One final deduplication before save
+    # Safety Net - One final deduplication before save
     final_len_before = len(df_final)
     df_final = df_final.drop_duplicates(subset=['drug_a', 'drug_b'])
     if len(df_final) < final_len_before:
@@ -187,67 +187,69 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
     return df_final
 
-
 def _generate_partitioned_negatives(df_pos_subset, anchors, background, all_drugs_df, n_needed, seed, mode='debug'):
     """
-    Rejection Sampling Strategy (O(K) complexity) using Python sets for O(1) lookups.
+    Finite Pool Strategy with Deduplication.
     """
     if n_needed == 0: return pd.DataFrame()
 
-    # 1. Build O(1) lookup set for existing positive pairs
-    # Canonicalize pairs (min, max) to handle undirected edges
-    pos_pairs_set = set(zip(
-        np.minimum(df_pos_subset['drug_a'], df_pos_subset['drug_b']),
-        np.maximum(df_pos_subset['drug_a'], df_pos_subset['drug_b'])
-    ))
-
-    # Ensure unique pools
     anchors = np.array(list(set(anchors)))
     background = np.array(list(set(background)))
 
-    negatives = set()
+    # Create meshgrid for candidates
+    idx_a, idx_b = np.meshgrid(np.arange(len(anchors)), np.arange(len(background)))
+    idx_a = idx_a.flatten()
+    idx_b = idx_b.flatten()
+
+    # Remove self-loops
+    mask_diff = anchors[idx_a] != background[idx_b]
+    idx_a = idx_a[mask_diff]
+    idx_b = idx_b[mask_diff]
+
+    candidates_a = anchors[idx_a]
+    candidates_b = background[idx_b]
+
+    # Canonicalize to ensure dedup works (A < B)
+    swap_mask = candidates_a > candidates_b
+    candidates_a[swap_mask], candidates_b[swap_mask] = candidates_b[swap_mask], candidates_a[swap_mask]
+
+    # Unique string keys for fast filtering
+    cand_keys = pd.Series(candidates_a).astype(str) + "|" + pd.Series(candidates_b).astype(str)
+    unique_mask = ~cand_keys.duplicated()
+    candidates_a = candidates_a[unique_mask]
+    candidates_b = candidates_b[unique_mask]
+    cand_keys = cand_keys[unique_mask]
+
+    # Filter out existing positives
+    pos_keys = set(df_pos_subset['drug_a'].astype(str) + "|" + df_pos_subset['drug_b'].astype(str))
+    valid_mask = ~cand_keys.isin(pos_keys)
+
+    valid_a = candidates_a[valid_mask]
+    valid_b = candidates_b[valid_mask]
+
+    num_available = len(valid_a)
+    print(f"[{mode}] Available Negatives: {num_available} (Needed: {n_needed})")
+
     rng = np.random.default_rng(seed)
 
-    # Safety: Max attempts to prevent infinite loops if saturation is high
-    max_attempts = n_needed * 50
-    attempts = 0
+    if num_available <= n_needed:
+        if num_available < n_needed:
+            print(f"[{mode}] WARNING: Insufficient negatives. Returning ALL available.")
+        final_a = valid_a
+        final_b = valid_b
+    else:
+        chosen_idx = rng.choice(num_available, size=n_needed, replace=False)
+        final_a = valid_a[chosen_idx]
+        final_b = valid_b[chosen_idx]
 
-    print(f"[{mode}] Generating {n_needed} negatives via Rejection Sampling...")
-
-    while len(negatives) < n_needed and attempts < max_attempts:
-        # Sample in batches for vectorization speedup (Python loop overhead reduction)
-        remaining = n_needed - len(negatives)
-        batch_size = max(remaining * 2, 500)
-
-        a_samples = rng.choice(anchors, size=batch_size)
-        b_samples = rng.choice(background, size=batch_size)
-
-        # Canonicalize samples
-        mins = np.minimum(a_samples, b_samples)
-        maxs = np.maximum(a_samples, b_samples)
-
-        # Filter valid pairs
-        for d1, d2 in zip(mins, maxs):
-            if d1 == d2: continue  # No self-loops
-
-            pair = (d1, d2)
-            # O(1) Lookup
-            if pair not in pos_pairs_set and pair not in negatives:
-                negatives.add(pair)
-                if len(negatives) == n_needed:
-                    break
-
-        attempts += batch_size
-
-    if len(negatives) < n_needed:
-        print(f"[{mode}] WARNING: Could only generate {len(negatives)}/{n_needed} negatives after {attempts} attempts.")
-
-    # Convert to DataFrame
-    res_df = pd.DataFrame(list(negatives), columns=['drug_a', 'drug_b'])
-    res_df['label'] = 0.0
-
-    # Map SMILES
     id_to_smiles = all_drugs_df.set_index('id')['smiles'].to_dict()
+
+    res_df = pd.DataFrame({
+        'drug_a': final_a,
+        'drug_b': final_b,
+        'label': 0.0
+    })
+
     res_df['smiles_a'] = res_df['drug_a'].map(id_to_smiles)
     res_df['smiles_b'] = res_df['drug_b'].map(id_to_smiles)
 
