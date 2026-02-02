@@ -132,10 +132,7 @@ def validate_dataset():
     print(f"      Val-Test:    {len(shared_val_test)} drugs ({len(shared_val_test)/len(all_drugs)*100:.1f}%)")
     print(f"      All splits:  {len(shared_all)} drugs ({len(shared_all)/len(all_drugs)*100:.1f}%)")
     
-    print("\n   [INFO]  NOTE: Drug overlap is EXPECTED in pair-disjoint split")
-    print("   → We test prediction of NEW COMBINATIONS of KNOWN drugs")
-    print("   → Same drug can appear in different pairs across splits")
-    
+
     # Check label distribution
     print("\n7. Checking label distribution across splits...")
     
@@ -191,7 +188,7 @@ def validate_dataset():
         print("[ERROR] Imbalanced label distribution")
     
     # Drug overlap is expected, not a failure
-    print("[INFO]  Drug overlap present (expected for pair-disjoint)")
+    print("[INFO]  Drug overlap present")
     
     print(f"\nPassed {checks_passed}/{checks_total} critical checks")
     
