@@ -1,6 +1,5 @@
 """
 Molecular featurization module.
-
 """
 
 import numpy as np
@@ -102,7 +101,7 @@ class GraphFeaturizer:
                     self._one_hot(atom.GetHybridization(), self.hybridization) +
                     [1 if atom.GetIsAromatic() else 0] +
                     [atom.GetFormalCharge()] +
-                    self._one_hot(atom.GetChiralTag(), self.chiral_types) # <--- Added Chirality
+                    self._one_hot(atom.GetChiralTag(), self.chiral_types)
             )
             x.append(features)
         x = torch.tensor(x, dtype=torch.float)
@@ -141,3 +140,15 @@ class GraphFeaturizer:
             edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
 
         return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+# --- 3. HELPER FUNCTION (Fixes ImportError) ---
+# Global instance to avoid recreation overhead
+_global_featurizer = GraphFeaturizer()
+
+def drug_to_graph(smiles, drug_name=None):
+    """
+    Wrapper function that train.py expects.
+    Ignores drug_name (used for debugging only) and returns the Data object.
+    """
+    return _global_featurizer.smiles_to_graph(smiles)

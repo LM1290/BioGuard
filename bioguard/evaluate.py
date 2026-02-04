@@ -19,6 +19,7 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 # Internal Imports
 from .model import BioGuardGAT
 from .data_loader import load_twosides_data
+from .enzyme import EnzymeManager  # <--- NEW IMPORT
 # Import the Cached Dataset class we defined in train.py
 from bioguard.train import BioGuardDataset
 
@@ -63,8 +64,20 @@ def evaluate_model(override_split=None):
     # We evaluate on the TEST set of the requested split
     test_df = df[df['split'] == 'test'].reset_index(drop=True)
 
+    # --- NEW: Detect Enzyme Dimension ---
+    # We must initialize the manager to know how many features (60) were used
+    enzyme_manager = EnzymeManager(allow_degraded=True)
+    enzyme_dim = enzyme_manager.vector_dim
+    print(f"Enzyme Features: {enzyme_dim}")
+    # ------------------------------------
+
     # 2. Initialize Model
-    model = BioGuardGAT(node_dim=train_node_dim, edge_dim=6).to(device)
+    # FIXED: Passed enzyme_dim to constructor so shape matches checkpoint
+    model = BioGuardGAT(
+        node_dim=train_node_dim,
+        edge_dim=6,
+        enzyme_dim=enzyme_dim
+    ).to(device)
 
     if not os.path.exists(MODEL_PATH):
         print(f"CRITICAL: Model file not found at {MODEL_PATH}")

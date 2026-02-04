@@ -77,7 +77,6 @@ class BioGuardGAT(nn.Module):
             data_b: Batch object for Drug B (includes enzyme_b)
         """
         # 1. Siamese Encoding
-        # Unpack explicitly for clarity
         vec_a = self.forward_one_arm(
             data_a.x,
             data_a.edge_index,
@@ -97,6 +96,21 @@ class BioGuardGAT(nn.Module):
         # 2. Symmetric Combination
         diff = torch.abs(vec_a - vec_b)
         combined = torch.cat([vec_a + vec_b, diff, vec_a * vec_b], dim=1)
+
+        # --- SHAPE GUARD ---
+        if combined.shape[1] != self.fc1.in_features:
+            current_enzyme_dim = (combined.shape[1] // 3) - self.graph_out_dim
+            expected_enzyme_dim = (self.fc1.in_features // 3) - self.graph_out_dim
+
+            raise RuntimeError(
+                f"\n[BioGuard Error] Dimension Mismatch!\n"
+                f"Model expects input dim {self.fc1.in_features} (Enzyme Dim: {expected_enzyme_dim}), "
+                f"but received {combined.shape[1]} (Enzyme Dim: {current_enzyme_dim}).\n"
+                f"CAUSE: The cached dataset (processed/*.pt) was created with Enzyme Dim {current_enzyme_dim}, "
+                f"but you are running with Enzyme Dim {expected_enzyme_dim}.\n"
+                f"FIX: Delete the 'data/processed' directory or the cached .pt files to force regeneration."
+            )
+        # -------------------
 
         # 3. Classification
         x = self.fc1(combined)

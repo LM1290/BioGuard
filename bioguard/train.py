@@ -1,256 +1,225 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch_geometric.data import Data, InMemoryDataset
-from torch_geometric.loader import DataLoader as PyGDataLoader
-from sklearn.metrics import precision_score, recall_score
-import argparse
-import os
-import os.path as osp
-import json
-import numpy as np
-from tqdm import tqdm
 import pandas as pd
-from joblib import Parallel, delayed
+import numpy as np
+import os
+import json
+import joblib
+import logging
+import argparse
+from tqdm import tqdm
+from sklearn.metrics import precision_score, recall_score, roc_auc_score, average_precision_score, f1_score
+from torch_geometric.loader import DataLoader as PyGDataLoader
+from torch_geometric.data import Data, Dataset
 
 # Internal Imports
-from bioguard.data_loader import load_twosides_data
-from bioguard.featurizer import GraphFeaturizer
-from bioguard.model import BioGuardGAT
-from bioguard.config import NODE_DIM
-from bioguard.enzyme import EnzymeManager
+from .model import BioGuardGAT
+from .data_loader import load_twosides_data
+from .enzyme import EnzymeManager
+from .config import NODE_DIM, EDGE_DIM
 
 # --- CONFIG ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+MODEL_PATH = os.path.join(ARTIFACT_DIR, 'model.pt')
+CALIBRATOR_PATH = os.path.join(ARTIFACT_DIR, 'calibrator.joblib')
+META_PATH = os.path.join(ARTIFACT_DIR, 'metadata.json')
+
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Logger
+logger = logging.getLogger(__name__)
 
 
-class PairData(Data):
+class BioGuardDataset(Dataset):
     """
-    Custom Data object to hold a pair of graphs + enzyme data.
-    Allows PyG to batch them correctly using 'follow_batch'.
-    """
-
-    def __inc__(self, key, value, *args, **kwargs):
-        if key == 'edge_index_b':
-            return self.x_b.size(0)
-        return super().__inc__(key, value, *args, **kwargs)
-
-
-class BioGuardDataset(InMemoryDataset):
-    """
-    In-Memory Dataset that loads 100x faster by saving a single collated .pt file.
+    In-Memory Dataset with RAM Caching for maximum speed.
     """
 
-    def __init__(self, root, df=None, split='train', transform=None, pre_transform=None):
+    def __init__(self, root, df, split='train', transform=None, pre_transform=None):
+        self.df = df.reset_index(drop=True)
         self.split = split
-        self.df = df
+        # We process EVERYTHING into a list of Data objects in RAM
+        # This eats RAM but is 100x faster than disk I/O per batch
+        self.enzyme_manager = EnzymeManager(allow_degraded=True)
+        self.cached_data = []
         super().__init__(root, transform, pre_transform)
-        # CRITICAL FIX: weights_only=False required for custom Data objects (PyG 2.4+)
-        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
-    @property
-    def processed_dir(self):
-        # Separate processed files by split to avoid overwrites
-        return osp.join(self.root, 'processed', self.split)
+        self._process_in_ram()
 
     @property
     def processed_file_names(self):
-        return ['data.pt']
+        return ['not_used.pt']
 
-    def process(self):
-        if self.df is None:
-            print(f"[{self.split}] No DataFrame provided. Assuming processed data exists.")
-            return
+    def _process_in_ram(self):
+        """
+        Converts the dataframe into a list of PyG Data objects stored in self.cached_data
+        """
+        from .featurizer import drug_to_graph  # Lazy import to avoid circular deps
 
         print(f"[{self.split}] Processing {len(self.df)} graphs (Parallelized)...")
-        os.makedirs(self.processed_dir, exist_ok=True)
 
-        # 1. Initialize Managers
-        # Note: We re-instantiate inside worker if needed, but here we pass config
-        enzyme_mgr = EnzymeManager(allow_degraded=True)
-        featurizer = GraphFeaturizer()
+        data_list = []
 
-        # 2. Worker Function for Parallelization
-        def process_row(row):
-            # A. Featurize Graphs
-            g1 = featurizer.smiles_to_graph(row['smiles_a'])
-            g2 = featurizer.smiles_to_graph(row['smiles_b'])
+        # Simple loop with tqdm
+        for idx, row in tqdm(self.df.iterrows(), total=len(self.df)):
+            # Drug A
+            g_a = drug_to_graph(row['smiles_a'], row['drug_a'])
+            g_a.enzyme_a = torch.tensor([self.enzyme_manager.get_vector(row['drug_a'])], dtype=torch.float)
 
-            if not (g1 and g2):
-                return None
+            # Drug B
+            g_b = drug_to_graph(row['smiles_b'], row['drug_b'])
+            g_b.enzyme_b = torch.tensor([self.enzyme_manager.get_vector(row['drug_b'])], dtype=torch.float)
 
-            # B. Get Enzyme Vectors (Fast Lookup)
-            # Returns [1, vector_dim] tensor for easy batching later
-            vec_a = torch.tensor(enzyme_mgr.get_vector(row['drug_a']), dtype=torch.float).unsqueeze(0)
-            vec_b = torch.tensor(enzyme_mgr.get_vector(row['drug_b']), dtype=torch.float).unsqueeze(0)
+            label = torch.tensor([float(row['label'])], dtype=torch.float)
 
-            # C. Build PairData
-            return PairData(
-                x=g1.x,
-                edge_index=g1.edge_index,
-                edge_attr=g1.edge_attr,
-                x_b=g2.x,
-                edge_index_b=g2.edge_index,
-                edge_attr_b=g2.edge_attr,
-                enzyme_a=vec_a,
-                enzyme_b=vec_b,
-                y=torch.tensor(row['label'], dtype=torch.float)
-            )
+            data_list.append((g_a, g_b, label))
 
-        # 3. Execute Parallel Job
-        # n_jobs=-1 uses all available cores
-        data_list = Parallel(n_jobs=-1)(
-            delayed(process_row)(row) for _, row in tqdm(self.df.iterrows(), total=len(self.df))
-        )
-
-        # 4. Filter Failures
-        data_list = [d for d in data_list if d is not None]
+        self.cached_data = data_list
         print(f"[{self.split}] Successfully processed {len(data_list)} pairs.")
 
-        if self.pre_filter is not None:
-            data_list = [data for data in data_list if self.pre_filter(data)]
+    def len(self):
+        return len(self.df)
 
-        if self.pre_transform is not None:
-            data_list = [self.pre_transform(data) for data in data_list]
+    def get(self, idx):
+        return self.cached_data[idx]
 
-        # Save collated file
-        torch.save(self.collate(data_list), self.processed_paths[0])
+
+def train_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    total_loss = 0
+
+    for batch_data in loader:
+        batch_a = batch_data[0].to(device)
+        batch_b = batch_data[1].to(device)
+        batch_y = batch_data[2].to(device)  # Shape [Batch, 1]
+
+        optimizer.zero_grad()
+        logits = model(batch_a, batch_b)
+        loss = criterion(logits, batch_y)
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
+def validate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    y_true = []
+    y_probs = []
+
+    with torch.no_grad():
+        for batch_data in loader:
+            batch_a = batch_data[0].to(device)
+            batch_b = batch_data[1].to(device)
+            batch_y = batch_data[2].to(device)
+
+            logits = model(batch_a, batch_b)
+            loss = criterion(logits, batch_y)
+            total_loss += loss.item()
+
+            probs = torch.sigmoid(logits)
+            y_true.extend(batch_y.cpu().numpy().flatten())
+            y_probs.extend(probs.cpu().numpy().flatten())
+
+    y_true = np.array(y_true)
+    y_probs = np.array(y_probs)
+
+    # METRICS
+    auprc = average_precision_score(y_true, y_probs)
+    roc_auc = roc_auc_score(y_true, y_probs)
+
+    # Helper F1 for logging
+    y_pred = (y_probs >= 0.5).astype(int)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    return total_loss / len(loader), auprc, roc_auc, f1
 
 
 def run_training(args):
+    # 1. Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # 1. Load Metadata & DataFrame
-    print("Loading TWOSIDES metadata...")
+    # 2. Load Data
     df = load_twosides_data(split_method=args.split)
 
-    train_df = df[df['split'] == 'train'].reset_index(drop=True)
-    val_df = df[df['split'] == 'val'].reset_index(drop=True)
+    train_df = df[df['split'] == 'train']
+    val_df = df[df['split'] == 'val']
 
-    # 2. Initialize Datasets (Triggers parallel processing if cache missing)
+    # 3. Create Datasets
     train_dataset = BioGuardDataset(root=DATA_DIR, df=train_df, split='train')
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
-    # 3. Loaders
-    num_workers = min(4, os.cpu_count())
-    print(f"Data Loaders initialized with num_workers={num_workers}")
+    # 4. DataLoaders
+    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-    # follow_batch=['x_b'] creates 'x_b_batch' vector for the second graph
-    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                                 num_workers=num_workers, follow_batch=['x_b'])
-    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                               num_workers=num_workers, follow_batch=['x_b'])
-
-    # 4. Model Setup
-    # Get dynamic enzyme dimension
-    enzyme_mgr = EnzymeManager(allow_degraded=True)
-    enzyme_dim = enzyme_mgr.vector_dim
-    node_dim = NODE_DIM
+    # 5. Model
+    enzyme_manager = EnzymeManager(allow_degraded=True)
+    enzyme_dim = enzyme_manager.vector_dim
 
     print(f"Initializing BioGuardGAT with Enzyme Dim: {enzyme_dim}")
 
-    # Save metadata for API
-    with open(os.path.join(ARTIFACT_DIR, 'metadata.json'), 'w') as f:
-        json.dump({'node_dim': node_dim, 'enzyme_dim': enzyme_dim}, f)
-
-    model = BioGuardGAT(node_dim=node_dim, edge_dim=6, enzyme_dim=enzyme_dim).to(device)
-
-    # Weighted Loss
-    num_pos = train_df['label'].sum()
-    num_neg = len(train_df) - num_pos
-    pos_weight_val = num_neg / num_pos if num_pos > 0 else 1.0
-    pos_weight_tensor = torch.tensor(pos_weight_val).to(device)
+    model = BioGuardGAT(
+        node_dim=NODE_DIM,
+        edge_dim=EDGE_DIM,
+        enzyme_dim=enzyme_dim
+    ).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    criterion = nn.BCEWithLogitsLoss()
 
-    # 5. Training Loop
-    best_val_loss = float('inf')
-    patience = 0
-    max_patience = 8
+    # 6. Training Loop
+    print("\nStarting training loop (Optimizing for AUPRC)...")
 
-    print("\nStarting training loop...")
+    best_val_auprc = -1.0
+    patience = 8
+    counter = 0
+
     for epoch in range(1, args.epochs + 1):
-        model.train()
-        total_loss = 0
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss, val_auprc, val_roc, val_f1 = validate(model, val_loader, criterion, device)
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}", leave=False):
-            batch = batch.to(device)
+        print(f"Epoch {epoch}: Train Loss={train_loss:.4f} | Val Loss={val_loss:.4f}")
+        print(f"    -> Val AUPRC: {val_auprc:.4f} | ROC-AUC: {val_roc:.4f} | F1: {val_f1:.4f}")
 
-            # Reconstruct Batch Objects with Enzyme Payloads
-            # batch.enzyme_a is automatically stacked by PyG into [batch_size, dim]
-            batch_a = Data(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr,
-                           batch=batch.batch, enzyme_a=batch.enzyme_a)
+        # TARGET: Maximize AUPRC
+        if val_auprc > best_val_auprc:
+            best_val_auprc = val_auprc
+            counter = 0
+            torch.save(model.state_dict(), MODEL_PATH)
 
-            # batch.enzyme_b matches batch.x_b (second graph in pair)
-            batch_b = Data(x=batch.x_b, edge_index=batch.edge_index_b, edge_attr=batch.edge_attr_b,
-                           batch=batch.x_b_batch, enzyme_b=batch.enzyme_b)
+            # Save Metadata
+            meta = {
+                'node_dim': NODE_DIM,
+                'edge_dim': EDGE_DIM,
+                'enzyme_dim': enzyme_dim,
+                'split_type': args.split,
+                'best_epoch': epoch,
+                'val_auprc': val_auprc,
+                'val_roc': val_roc,
+                'val_loss': val_loss
+            }
+            with open(META_PATH, 'w') as f:
+                json.dump(meta, f)
 
-            optimizer.zero_grad()
-            logits = model(batch_a, batch_b)
-            loss = criterion(logits, batch.y.unsqueeze(1))
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        avg_train_loss = total_loss / len(train_loader)
-
-        # Validation
-        model.eval()
-        val_loss = 0
-        all_preds = []
-        all_labels = []
-
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(device)
-
-                batch_a = Data(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr,
-                               batch=batch.batch, enzyme_a=batch.enzyme_a)
-                batch_b = Data(x=batch.x_b, edge_index=batch.edge_index_b, edge_attr=batch.edge_attr_b,
-                               batch=batch.x_b_batch, enzyme_b=batch.enzyme_b)
-
-                logits = model(batch_a, batch_b)
-                loss = criterion(logits, batch.y.unsqueeze(1))
-                val_loss += loss.item()
-
-                probs = torch.sigmoid(logits)
-                preds = (probs > 0.5).float()
-
-                all_preds.extend(preds.cpu().numpy().flatten())
-                all_labels.extend(batch.y.cpu().numpy().flatten())
-
-        avg_val_loss = val_loss / len(val_loader)
-        val_precision = precision_score(all_labels, all_preds, zero_division=0)
-        val_recall = recall_score(all_labels, all_preds, zero_division=0)
-        scheduler.step(avg_val_loss)
-
-        print(f"Epoch {epoch}: Train Loss={avg_train_loss:.4f} | Val Loss={avg_val_loss:.4f}")
-        print(f"    -> Val Precision: {val_precision:.4f} | Val Recall: {val_recall:.4f}")
-
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), os.path.join(ARTIFACT_DIR, 'model.pt'))
-            print("    -> Model saved.")
-            patience = 0
+            print("    -> Model saved (New Best AUPRC).")
         else:
-            patience += 1
-            print(f"    -> Patience {patience}/{max_patience}")
-            if patience >= max_patience:
+            counter += 1
+            print(f"    -> Patience {counter}/{patience}")
+            if counter >= patience:
                 print("Early stopping triggered.")
                 break
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--split', type=str, default='scaffold')
-    args = parser.parse_args()
-    run_training(args)
+    pass
