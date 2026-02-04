@@ -121,18 +121,3 @@ python -m bioguard.train_lgbm
 *   **Transporter Features:** Integration of P-gp and OATP transporter data to address the current false-negative rate on non-metabolic interactions.
 
 ---
-
-## Citation
-
-If you utilize this pipeline or the OOD benchmarking framework, please cite:
-
-```bibtex
-@software{bioguard2026,
-  author = {Maheswaran, Lalit},
-  title = {BioGuard: Integrating Metabolic Priors for OOD Generalization in DDI},
-  institution = {Georgia Institute of Technology},
-  year = {2026},
-  note = {Scaffold-Disjoint Benchmark & CYP450 Integration}
-}
-```
-```
