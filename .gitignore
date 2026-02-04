@@ -7,7 +7,7 @@ __pycache__/
 # Raw Data
 data/
 *.parquet
-
+*.csv
 
 # Visualizations & Results
 artifacts/*.png
