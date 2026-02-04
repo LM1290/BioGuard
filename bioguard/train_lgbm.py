@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, recall_score
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from bioguard.data_loader import load_twosides_data
@@ -93,6 +93,7 @@ def main():
     auc = roc_auc_score(y_test, y_pred)
     pr = average_precision_score(y_test, y_pred)
     acc = accuracy_score(y_test, (y_pred >= 0.5).astype(int))
+    rec = recall_score(y_test, y_pred >= 0.5)
 
     print("\n" + "=" * 40)
     print(f"LGBM + ENZYMES RESULTS ({args.split.upper()})")
@@ -100,6 +101,7 @@ def main():
     print(f"ROC-AUC: {auc:.4f}")
     print(f"PR-AUC:  {pr:.4f}")
     print(f"Accuracy: {acc:.4f}")
+    print(f"Recall:   {rec:.4f}")
     print("=" * 40)
 
     # Save

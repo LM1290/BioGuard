@@ -24,7 +24,6 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 MODEL_PATH = os.path.join(ARTIFACT_DIR, 'model.pt')
-CALIBRATOR_PATH = os.path.join(ARTIFACT_DIR, 'calibrator.joblib')
 META_PATH = os.path.join(ARTIFACT_DIR, 'metadata.json')
 
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
@@ -37,13 +36,13 @@ logger = logging.getLogger(__name__)
 class BioGuardDataset(Dataset):
     """
     In-Memory Dataset with RAM Caching for maximum speed.
+    Stores data as tuples: (Graph_A, Graph_B, Label)
     """
 
     def __init__(self, root, df, split='train', transform=None, pre_transform=None):
         self.df = df.reset_index(drop=True)
         self.split = split
-        # We process EVERYTHING into a list of Data objects in RAM
-        # This eats RAM but is 100x faster than disk I/O per batch
+        # Enzyme Manager handles the biological context lookup
         self.enzyme_manager = EnzymeManager(allow_degraded=True)
         self.cached_data = []
         super().__init__(root, transform, pre_transform)
@@ -58,13 +57,14 @@ class BioGuardDataset(Dataset):
         """
         Converts the dataframe into a list of PyG Data objects stored in self.cached_data
         """
-        from .featurizer import drug_to_graph  # Lazy import to avoid circular deps
+        # Lazy import to avoid circular dependencies
+        from .featurizer import drug_to_graph
 
         print(f"[{self.split}] Processing {len(self.df)} graphs (Parallelized)...")
 
         data_list = []
 
-        # Simple loop with tqdm
+        # We iterate and create graph objects once, keeping them in RAM.
         for idx, row in tqdm(self.df.iterrows(), total=len(self.df)):
             # Drug A
             g_a = drug_to_graph(row['smiles_a'], row['drug_a'])
@@ -76,6 +76,7 @@ class BioGuardDataset(Dataset):
 
             label = torch.tensor([float(row['label'])], dtype=torch.float)
 
+            # Store as tuple (Lightweight)
             data_list.append((g_a, g_b, label))
 
         self.cached_data = data_list
@@ -93,14 +94,18 @@ def train_epoch(model, loader, optimizer, criterion, device):
     total_loss = 0
 
     for batch_data in loader:
+        # Unpack tuple from DataLoader
         batch_a = batch_data[0].to(device)
         batch_b = batch_data[1].to(device)
         batch_y = batch_data[2].to(device)  # Shape [Batch, 1]
 
         optimizer.zero_grad()
+
+        # Forward Pass
         logits = model(batch_a, batch_b)
         loss = criterion(logits, batch_y)
 
+        # Backward Pass
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -134,10 +139,11 @@ def validate(model, loader, criterion, device):
     y_probs = np.array(y_probs)
 
     # METRICS
+    # AUPRC is the primary metric for imbalanced classification
     auprc = average_precision_score(y_true, y_probs)
     roc_auc = roc_auc_score(y_true, y_probs)
 
-    # Helper F1 for logging
+    # Helper F1 for logging (using 0.5 threshold)
     y_pred = (y_probs >= 0.5).astype(int)
     f1 = f1_score(y_true, y_pred, zero_division=0)
 
@@ -160,10 +166,11 @@ def run_training(args):
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
     # 4. DataLoaders
-    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    # num_workers=0 is crucial for in-memory datasets to avoid fork overhead/copying
+    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    # 5. Model
+    # 5. Model Initialization
     enzyme_manager = EnzymeManager(allow_degraded=True)
     enzyme_dim = enzyme_manager.vector_dim
 
@@ -174,6 +181,22 @@ def run_training(args):
         edge_dim=EDGE_DIM,
         enzyme_dim=enzyme_dim
     ).to(device)
+
+    # --- PRE-TRAINING INTEGRATION ---
+    pretrain_path = os.path.join(ARTIFACT_DIR, 'gat_encoder_weights.pt')
+    if os.path.exists(pretrain_path):
+        print(f"Loading pretrained encoder from {pretrain_path}...")
+        try:
+            encoder_weights = torch.load(pretrain_path, map_location=device)
+            # Load weights into the first GAT layer (encoder)
+            model.conv1.load_state_dict(encoder_weights, strict=True)
+            print("Pretrained weights loaded successfully! (Transfer Learning Activated)")
+        except Exception as e:
+            print(f"WARNING: Could not load pretrained weights: {e}")
+            print("Continuing with random initialization...")
+    else:
+        print("No pretrained weights found. Training from scratch.")
+    # --------------------------------
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
