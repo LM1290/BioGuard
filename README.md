@@ -97,6 +97,11 @@ python -m bioguard.main train
 # (Optional) Re-run the ChEMBL scraper (Cached file included in /data)
 python tools/map_human_cyps.py
 python tools/fetch_full_enzyme_profile.py
+python bioguard.cyp_predictor
+#Unit Test for NCEs
+python tools.patch_smiles
+
+python bioguard.NCEcypTest
 ```
 
 ### Inference & Training
