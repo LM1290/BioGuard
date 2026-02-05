@@ -41,6 +41,7 @@ Standard datasets (TWOSIDES) suffer from **Hub Bias** (e.g., Warfarin interacts 
 *   **Source:** ChEMBL API / PubChem.
 *   **Resolution:** InChIKey-based ID mapping to resolve mismatched datasets.
 *   **Enrichment:** Explicit feature injection for certain Metabolic Enzymes (CYP3A4, CYP2D6, CYP2C9, CYP2C19, CYP1A2).
+*   **Extrapolation:** Uses metabolic imputation to predict CYP substrate/inhibitor status for NCEs via trained RandomForest Classifier.
 
 ### B. Model A: LightGBM 
 *   **Input:** 1024-bit ECFP4 Fingerprints + 30-dim CYP Vector.
