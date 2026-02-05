@@ -1,6 +1,4 @@
 # 1. FORCE linux/amd64
-# This allows us to use standard pre-compiled wheels (x86_64) via Rosetta emulation.
-# It solves the "Exit 1" compilation error by avoiding source builds entirely.
 FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
