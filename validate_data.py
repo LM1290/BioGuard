@@ -72,7 +72,7 @@ def validate_dataset():
         print("   [OK] PASS: No reverse pair duplicates")
     
     # Create splits and validate
-    print("\n4. Creating pair-disjoint splits...")
+    print("\n4. ")
     train_df = df[df['split'] == 'train']
     val_df = df[df['split'] == 'val']
     test_df = df[df['split'] == 'test']
@@ -110,7 +110,7 @@ def validate_dataset():
         print("   → Train/val/test are properly disjoint")
     
     # Check drug overlap (expected for pair-disjoint)
-    print("\n6. Analyzing drug overlap (expected for pair-disjoint)...")
+    print("\n6. Analyzing drug overlap ...")
     
     train_drugs = set(train_df['drug_a']).union(set(train_df['drug_b']))
     val_drugs = set(val_df['drug_a']).union(set(val_df['drug_b']))
@@ -126,7 +126,7 @@ def validate_dataset():
     print(f"   Train drugs: {len(train_drugs)}")
     print(f"   Val drugs:   {len(val_drugs)}")
     print(f"   Test drugs:  {len(test_drugs)}")
-    print(f"\n   Drug overlap (this is EXPECTED and CORRECT for pair-disjoint):")
+    print(f"\n   Drug overlap:")
     print(f"      Train-Val:   {len(shared_train_val)} drugs ({len(shared_train_val)/len(all_drugs)*100:.1f}%)")
     print(f"      Train-Test:  {len(shared_train_test)} drugs ({len(shared_train_test)/len(all_drugs)*100:.1f}%)")
     print(f"      Val-Test:    {len(shared_val_test)} drugs ({len(shared_val_test)/len(all_drugs)*100:.1f}%)")
