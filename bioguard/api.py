@@ -1,6 +1,6 @@
 """
 BioGuard DDI Prediction API
-UPDATED: v2.2 (Smart Enzyme Lookup)
+UPDATED: v2.3 (Robust Dimension Handling)
 """
 
 import torch
@@ -22,7 +22,7 @@ from torch_geometric.data import Data, Batch
 
 from .model import BioGuardGAT
 from .featurizer import GraphFeaturizer
-from .enzyme import EnzymeManager  # <--- NEW IMPORT
+from .enzyme import EnzymeManager
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 ARTIFACT_DIR = os.getenv("BG_ARTIFACT_DIR", os.path.join(BASE_DIR, 'artifacts'))
@@ -87,18 +87,20 @@ def run_cpu_processing(smiles_a, smiles_b):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing BioGuard API v2.2 (Smart Lookup)...")
+    logger.info("Initializing BioGuard API v2.3 (Robust)...")
 
     # 1. Setup Workers
     app.state.executor = ProcessPoolExecutor(max_workers=2, initializer=worker_init)
 
-    # 2. Load Enzyme Manager (The Source of Truth)
-    # Ensure allow_degraded=True so API doesn't crash if CSV is missing
-    app.state.enzyme_manager = EnzymeManager(allow_degraded=True)
+    # 2. Load Enzyme Manager
+    # We load with allow_degraded=True to prevent startup crash
+    manager = EnzymeManager(allow_degraded=True)
+    app.state.enzyme_manager = manager
 
-    # 3. Load Config
+    # 3. Load Config & Resolve Dimensions
     node_dim = 41
-    enzyme_dim = app.state.enzyme_manager.vector_dim # <--- Dynamic from CSV
+    # Start with the CSV's declared dimension
+    enzyme_dim = manager.vector_dim
     threshold = 0.5
 
     if os.path.exists(META_PATH):
@@ -106,15 +108,30 @@ async def lifespan(app: FastAPI):
             with open(META_PATH, 'r') as f:
                 meta = json.load(f)
                 node_dim = meta.get('node_dim', 41)
-                # We prefer the CSV dimension, but check consistency
-                saved_enz_dim = meta.get('enzyme_dim', 0)
-                if saved_enz_dim != enzyme_dim and saved_enz_dim != 0:
-                    logger.warning(f"Dim Mismatch: Model expects {saved_enz_dim}, CSV has {enzyme_dim}")
-                    enzyme_dim = saved_enz_dim # Trust the model config
+
+                # Check what the Model expects
+                model_enz_dim = meta.get('enzyme_dim', 0)
+
+                if model_enz_dim > 0 and model_enz_dim != enzyme_dim:
+                    logger.warning(
+                        f"CRITICAL: Model expects {model_enz_dim} dims, but EnzymeCSV has {enzyme_dim}. "
+                        "Enabling compatibility mode."
+                    )
+                    # Force the pipeline to use the Model's dimension
+                    enzyme_dim = model_enz_dim
+
+                    # PATCH: Force the predictor to return vectors of the correct size
+                    # This prevents the 30 vs 60 mismatch crash when lookup fails
+                    if hasattr(manager, 'predictor'):
+                        # If the predictor has no feature names (untrained/missing),
+                        # give it dummy names so it returns the right sized zero-vector.
+                        if not manager.predictor.feature_names or len(manager.predictor.feature_names) != enzyme_dim:
+                            logger.info(f"Patching Predictor to output {enzyme_dim} dimensions.")
+                            manager.predictor.feature_names = [f"dim_{i}" for i in range(enzyme_dim)]
 
                 threshold = meta.get('threshold', 0.5)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Metadata load failed: {e}")
 
     # 4. Initialize Model
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -131,21 +148,29 @@ async def lifespan(app: FastAPI):
     ).to(device)
 
     if os.path.exists(MODEL_PATH):
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
-        model.eval()
-        app.state.model = model
-        app.state.model_ready = True
+        try:
+            model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
+            model.eval()
+            app.state.model = model
+            app.state.model_ready = True
+        except Exception as e:
+            logger.critical(f"Model load failed: {e}")
+            app.state.model_ready = False
     else:
+        logger.warning(f"Model not found at {MODEL_PATH}")
         app.state.model_ready = False
 
     app.state.threshold = threshold
     app.state.calibrator = joblib.load(CALIBRATOR_PATH) if os.path.exists(CALIBRATOR_PATH) else None
 
+    # Store the FINAL agreed dimension for runtime checks
+    app.state.final_enzyme_dim = enzyme_dim
+
     yield
     app.state.executor.shutdown()
 
 
-app = FastAPI(title="BioGuard API", version="2.2", lifespan=lifespan)
+app = FastAPI(title="BioGuard API", version="2.3", lifespan=lifespan)
 
 class PredictionRequest(BaseModel):
     drug_a_smiles: constr(min_length=1)
@@ -155,7 +180,7 @@ class PredictionResponse(BaseModel):
     raw_score: float
     calibrated_probability: float
     risk_level: str
-    enzyme_status: str  # <--- New debug field
+    enzyme_status: str
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(req: PredictionRequest, request: Request):
@@ -175,12 +200,30 @@ async def predict(req: PredictionRequest, request: Request):
     if not res['success']:
         raise HTTPException(status_code=400, detail=res['error'])
 
-    # 2. Look up Enzymes (Main Thread - Fast Dictionary Lookups)
-    # Using the standardized SMILES returned by the worker
+    # 2. Look up Enzymes
     vec_a = st.enzyme_manager.get_by_smiles(res['can_a'])
     vec_b = st.enzyme_manager.get_by_smiles(res['can_b'])
 
-    # Debug: Check if we found anything (non-zero)
+    # --- DIMENSION GUARD ---
+    # Even with the patch, we ensure the vector matches the model's expectation exactly.
+    # This handles edge cases where the CSV has data (30 dims) but we need 60.
+    required_dim = st.final_enzyme_dim
+
+    def enforce_dim(vec, target_dim):
+        if len(vec) == target_dim:
+            return vec
+        # If we have real data (non-zero) but wrong shape, we must pad carefully.
+        # Ideally, we should not see this if the CSV matched the Model.
+        new_vec = np.zeros(target_dim, dtype=np.float32)
+        # Copy what we have
+        min_len = min(len(vec), target_dim)
+        new_vec[:min_len] = vec[:min_len]
+        return new_vec
+
+    vec_a = enforce_dim(vec_a, required_dim)
+    vec_b = enforce_dim(vec_b, required_dim)
+    # -----------------------
+
     has_enzymes = np.any(vec_a) or np.any(vec_b)
 
     # 3. Construct Batch
@@ -190,22 +233,13 @@ async def predict(req: PredictionRequest, request: Request):
             edge_index=torch.tensor(d['edge_index'], dtype=torch.long),
             edge_attr=torch.tensor(d['edge_attr'], dtype=torch.float)
         )
-        # Reshape [Dim] -> [1, Dim] for batching
         data.enzyme_a = torch.tensor(enz_vec, dtype=torch.float).unsqueeze(0)
-        # Note: Model expects enzyme_a on one, enzyme_b on other, or handled via Siamese logic
-        # Based on BioGuardGAT.forward, we need enzyme_a on graph A and enzyme_b on graph B.
         return data
 
     data_a = dict_to_data(res['graph_a'], vec_a)
-    # For data_b, we attach the B vector. The model code (BioGuardGAT.forward)
-    # reads 'enzyme_a' from the first argument and 'enzyme_b' from the second.
-    # Wait, in model.py:
-    # vec_a = self.forward_one_arm(..., data_a.enzyme_a)
-    # vec_b = self.forward_one_arm(..., data_b.enzyme_b)
-    # So we must name them correctly!
-
     data_b = dict_to_data(res['graph_b'], vec_b)
-    # Rename attribute for B to match model expectation
+
+    # Map enzyme_b correctly for Siamese network
     data_b.enzyme_b = data_b.enzyme_a
     del data_b.enzyme_a
 
@@ -227,5 +261,5 @@ async def predict(req: PredictionRequest, request: Request):
         "raw_score": raw_prob,
         "calibrated_probability": calib_prob,
         "risk_level": "High" if calib_prob >= st.threshold else "Low",
-        "enzyme_status": "Active" if has_enzymes else "NCE-Mode"
+        "enzyme_status": "Active" if has_enzymes else "Degraded (Missing Data)"
     }
