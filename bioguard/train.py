@@ -245,4 +245,11 @@ def run_training(args):
 
 
 if __name__ == "__main__":
-    pass
+    parser = argparse.ArgumentParser(description="BioGuard Training")
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--split', type=str, default='random', choices=['random', 'cold_drug'], help='Split method')
+
+    args = parser.parse_args()
+    run_training(args)

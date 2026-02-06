@@ -1,112 +1,100 @@
-"""
-BioGuard - Drug-Drug Interaction Prediction System
-Main entry point for training, evaluation, and serving.
-
-Usage:
-    python -m bioguard.main [command] --split [random|cold|scaffold] --batch_size 128
-"""
-
-import sys
 import argparse
 import logging
+import sys
+import os
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger(__name__)
+
+# --- COMMAND HANDLERS (Lazy Imports) ---
+
+def run_serve(args):
+    """Start the API server."""
+    import uvicorn
+    print("="*60)
+    print(f"Starting BioGuard API on {args.host}:{args.port}")
+    print("Mode: Production (GNN Inference)")
+    print("="*60)
+    uvicorn.run(
+        "bioguard.api:app",
+        host=args.host,
+        port=args.port,
+        workers=1, # ProcessPoolExecutor in api.py handles the heavy lifting
+        log_level="info"
+    )
+
+def run_train(args):
+    """Run the training pipeline."""
+    from bioguard.train import run_training
+    # Handle quick mode
+    if args.quick:
+        print("--- QUICK MODE: 1 Epoch, Tiny Batch ---")
+        args.epochs = 1
+        args.batch_size = 4
+        args.split = 'random'
+    run_training(args)
+
+def run_eval(args):
+    """Run model evaluation."""
+    from bioguard.evaluate import evaluate_model
+    evaluate_model(override_split=args.split)
+
+def run_baselines(args):
+    """Run baseline models (Tanimoto, RF, LR)."""
+    from bioguard.baselines import run_baselines
+    run_baselines(args)
+
+def run_compare(args):
+    """Generate comparison charts and report."""
+    from bioguard.compare import main as compare_main
+    compare_main()
+
+# --- MAIN ENTRYPOINT ---
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='BioGuard - Drug-Drug Interaction Prediction System',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description="BioGuard CLI - DDI Prediction System")
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
 
-    parser.add_argument(
-        'command',
-        choices=['train', 'eval', 'baselines', 'compare', 'serve'],
-        help='Command to run'
-    )
+    # 1. SERVE
+    p_serve = subparsers.add_parser("serve", help="Start API Server")
+    p_serve.add_argument("--host", default="0.0.0.0", help="Host IP")
+    p_serve.add_argument("--port", type=int, default=8000, help="Port")
+    p_serve.set_defaults(func=run_serve)
 
-    # Series B: Added split strategy control
-    parser.add_argument(
-        '--split',
-        type=str,
-        default='cold',
-        choices=['random', 'cold', 'scaffold'],
-        help="Data split strategy: 'random' (easy), 'cold' (strict), 'scaffold' (hardest)"
-    )
+    # 2. TRAIN
+    p_train = subparsers.add_parser("train", help="Train GNN Model")
+    p_train.add_argument("--epochs", type=int, default=50)
+    p_train.add_argument("--batch_size", type=int, default=128)
+    p_train.add_argument("--lr", type=float, default=1e-4)
+    p_train.add_argument("--split", type=str, default='cold', choices=['random', 'cold', 'scaffold'])
+    p_train.add_argument("--quick", action='store_true', help="Sanity check run")
+    p_train.set_defaults(func=run_train)
 
-    # --- TRAINING ARGUMENTS ---
-    parser.add_argument(
-        '--batch_size',
-        type=int,
-        default=128,
-        help='Batch size for training and evaluation'
-    )
+    # 3. EVAL
+    p_eval = subparsers.add_parser("eval", help="Evaluate Trained Model")
+    p_eval.add_argument("--split", type=str, default=None, help="Override split type")
+    p_eval.set_defaults(func=run_eval)
 
-    parser.add_argument(
-        '--epochs',
-        type=int,
-        default=50,
-        help='Number of training epochs'
-    )
+    # 4. BASELINES
+    p_base = subparsers.add_parser("baselines", help="Run Baseline Models")
+    p_base.add_argument("--split", type=str, default='cold', choices=['random', 'cold', 'scaffold'])
+    p_base.add_argument("--quick", action='store_true', help="Skip slow ML baselines")
+    p_base.set_defaults(func=run_baselines)
 
-    parser.add_argument(
-        '--lr',
-        type=float,
-        default=1e-4,
-        help='Learning rate for optimizer'
-    )
+    # 5. COMPARE
+    p_comp = subparsers.add_parser("compare", help="Generate Comparison Report")
+    p_comp.set_defaults(func=run_compare)
 
-    # --- BASELINE ARGUMENTS ---
-    # FIX: Added this missing argument so baselines.py doesn't crash
-    parser.add_argument(
-        '--quick',
-        action='store_true',
-        help='Skip slow ML baselines (LR/RF) and run only Tanimoto'
-    )
-    # --------------------------------
-
+    # Parse & Execute
     args = parser.parse_args()
-
-    if args.command == "train":
-        from .train import run_training
-        # Pass the whole args object so train.py can see flags
-        run_training(args)
-
-    elif args.command == "eval":
-        from .evaluate import evaluate_model
-        evaluate_model(override_split=args.split)
-
-    elif args.command == "baselines":
-        from .baselines import run_baselines
-        run_baselines(args)
-
-    elif args.command == "compare":
-        from .compare import main as compare_main
-        compare_main()
-
-    elif args.command == "serve":
-        import uvicorn
-        print("="*60)
-        print("Starting BioGuard API Server")
-        print("="*60)
-        print("IMPORTANT: Graph Neural Network Inference Mode")
-        print("Running with workers=1 (ProcessPoolExecutor handles parallelism)")
-        print("="*60 + "\n")
-
-        uvicorn.run(
-            "bioguard.api:app",
-            host="0.0.0.0",
-            port=8000,
-            workers=1,
-            log_level="info"
-        )
+    if hasattr(args, 'func'):
+        args.func(args)
     else:
         parser.print_help()
-        sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
