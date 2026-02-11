@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, constr
-from typing import List, Optional
+from typing import Optional
 from rdkit import Chem
 
 # PyG Imports

@@ -7,8 +7,6 @@ Verifies that the dataset has no data leakage issues:
 3. Reports statistics on drug overlap (expected for pair-disjoint)
 """
 
-import pandas as pd
-import numpy as np
 from collections import Counter
 
 from bioguard.data_loader import load_twosides_data
@@ -95,7 +93,7 @@ def validate_dataset():
     total_overlap = len(overlap_train_val) + len(overlap_train_test) + len(overlap_val_test)
     
     if total_overlap > 0:
-        print(f"   [ERROR] FAIL: Found pair overlap between splits!")
+        print("   [ERROR] FAIL: Found pair overlap between splits!")
         print(f"      Train-Val overlap:   {len(overlap_train_val)} pairs")
         print(f"      Train-Test overlap:  {len(overlap_train_test)} pairs")
         print(f"      Val-Test overlap:    {len(overlap_val_test)} pairs")
@@ -126,7 +124,7 @@ def validate_dataset():
     print(f"   Train drugs: {len(train_drugs)}")
     print(f"   Val drugs:   {len(val_drugs)}")
     print(f"   Test drugs:  {len(test_drugs)}")
-    print(f"\n   Drug overlap:")
+    print("\n   Drug overlap:")
     print(f"      Train-Val:   {len(shared_train_val)} drugs ({len(shared_train_val)/len(all_drugs)*100:.1f}%)")
     print(f"      Train-Test:  {len(shared_train_test)} drugs ({len(shared_train_test)/len(all_drugs)*100:.1f}%)")
     print(f"      Val-Test:    {len(shared_val_test)} drugs ({len(shared_val_test)/len(all_drugs)*100:.1f}%)")
@@ -153,7 +151,7 @@ def validate_dataset():
         print(f"   [WARNING]  WARNING: Label distribution varies by {max_diff*100:.1f}%")
         print("   → May indicate stratification issues")
     else:
-        print(f"   [OK] PASS: Label distribution is balanced across splits")
+        print("   [OK] PASS: Label distribution is balanced across splits")
     
     # Summary
     print("\n" + "="*80)

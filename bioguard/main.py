@@ -1,7 +1,5 @@
 import argparse
 import logging
-import sys
-import os
 
 # Configure logging
 logging.basicConfig(

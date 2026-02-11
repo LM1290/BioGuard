@@ -8,7 +8,6 @@ UPDATED: v3.0 (The "Board-Ready" Edition)
 
 import json
 import os
-import sys
 import numpy as np
 import matplotlib
 matplotlib.use('Agg') # Force headless mode for server compatibility
@@ -196,7 +195,7 @@ def main():
     if data['baselines'] or data['gnn']:
         plot_bar_comparison(data['baselines'], data['gnn'])
         plot_radar_chart(data['baselines'], data['gnn'])
-        print(f"\n[Artifacts Generated]")
+        print("\n[Artifacts Generated]")
         print(f"- {os.path.join(ARTIFACT_DIR, 'comparison_radar.png')}")
         print(f"- {os.path.join(ARTIFACT_DIR, 'comparison_bars.png')}")
 

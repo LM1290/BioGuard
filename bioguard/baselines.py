@@ -13,12 +13,10 @@ Updates:
 """
 
 import numpy as np
-import pandas as pd
 import os
 import json
 import argparse
 from tqdm import tqdm
-import warnings
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -26,9 +24,7 @@ from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
     accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score
+    f1_score
 )
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem

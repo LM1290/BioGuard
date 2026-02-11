@@ -4,10 +4,8 @@ Molecular featurization module.
 
 import numpy as np
 import torch
-import pandas as pd
 from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator, Descriptors, rdchem
-from rdkit.Chem.MolStandardize import rdMolStandardize
 from torch_geometric.data import Data
 
 # --- 1. LEGACY FEATURIZER (FOR BASELINES) ---

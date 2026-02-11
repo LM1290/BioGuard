@@ -6,7 +6,6 @@ UPDATED: v5.0 (Enzyme-Ready & Strict Deduplication)
 import pandas as pd
 import numpy as np
 import os
-import warnings
 from tdc.multi_pred import DDI
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold

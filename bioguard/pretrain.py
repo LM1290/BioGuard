@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import argparse
-import numpy as np
 from tqdm import tqdm
 from torch_geometric.loader import DataLoader as PyGDataLoader
 from torch_geometric.nn import GATv2Conv

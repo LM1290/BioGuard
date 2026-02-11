@@ -1,6 +1,5 @@
 import numpy as np
 import logging
-import pandas as pd
 from bioguard.enzyme import EnzymeManager
 from bioguard.cyp_predictor import CYPPredictor
 
@@ -25,7 +24,7 @@ def test_integration():
     # If this fails, your CSV loading is broken.
     warfarin_smiles = "CC(=O)C(c1ccccc1)c1c(O)c2ccccc2oc1=O"
 
-    print(f"\n[TEST A] Known Drug: Warfarin")
+    print("\n[TEST A] Known Drug: Warfarin")
     vec_known = mgr.get_by_smiles(warfarin_smiles)
 
     # Validation: ChEMBL vectors are usually binary (0.0 or 1.0) or close to it.
@@ -46,7 +45,7 @@ def test_integration():
     # Guaranteed to NOT be in TWOSIDES/ChEMBL.
     nce_smiles = "Fc1ccc(S(=O)(=O)N(C)CC2=CN=C(C)N=C2CC(=O)O)cc1"
 
-    print(f"\n[TEST B] True NCE: 'BioGuard-X'")
+    print("\n[TEST B] True NCE: 'BioGuard-X'")
     print(f"  SMILES: {nce_smiles}")
 
     # 1. Run direct prediction to see what the model thinks

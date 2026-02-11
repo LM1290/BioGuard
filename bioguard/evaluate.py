@@ -52,7 +52,7 @@ def evaluate_model(override_split=None):
     # Allow overriding the split (e.g., testing on 'random' even if trained on 'cold')
     split_type = override_split if override_split else train_split
 
-    print(f"--- BioGuard Evaluation ---")
+    print("--- BioGuard Evaluation ---")
     print(f"Model Node Dim: {train_node_dim}")
     print(f"Eval Split:   {split_type.upper()}")
     print(f"Threshold:    {threshold:.4f}")
