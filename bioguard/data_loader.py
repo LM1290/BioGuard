@@ -1,6 +1,5 @@
 """
 Data loading and preprocessing module for TWOSIDES DDI dataset.
-UPDATED: v5.0 (Enzyme-Ready & Strict Deduplication)
 """
 
 import pandas as pd
@@ -188,59 +187,63 @@ def load_twosides_data(train_negative_ratio=1.0, test_negative_ratio=9.0, random
 
 def _generate_partitioned_negatives(df_pos_subset, anchors, background, all_drugs_df, n_needed, seed, mode='debug'):
     """
-    Finite Pool Strategy with Deduplication.
+    Random Negative Sampling Strategy (Vectorized) - Optimized for Speed.
+    Replaces Python loops with Pandas/Numpy vectorization.
     """
     if n_needed == 0: return pd.DataFrame()
 
     anchors = np.array(list(set(anchors)))
     background = np.array(list(set(background)))
 
-    # Create meshgrid for candidates
-    idx_a, idx_b = np.meshgrid(np.arange(len(anchors)), np.arange(len(background)))
-    idx_a = idx_a.flatten()
-    idx_b = idx_b.flatten()
-
-    # Remove self-loops
-    mask_diff = anchors[idx_a] != background[idx_b]
-    idx_a = idx_a[mask_diff]
-    idx_b = idx_b[mask_diff]
-
-    candidates_a = anchors[idx_a]
-    candidates_b = background[idx_b]
-
-    # Canonicalize to ensure dedup works (A < B)
-    swap_mask = candidates_a > candidates_b
-    candidates_a[swap_mask], candidates_b[swap_mask] = candidates_b[swap_mask], candidates_a[swap_mask]
-
-    # Unique string keys for fast filtering
-    cand_keys = pd.Series(candidates_a).astype(str) + "|" + pd.Series(candidates_b).astype(str)
-    unique_mask = ~cand_keys.duplicated()
-    candidates_a = candidates_a[unique_mask]
-    candidates_b = candidates_b[unique_mask]
-    cand_keys = cand_keys[unique_mask]
-
-    # Filter out existing positives
+    # 1. Existing Positives Set (O(1) lookup structure)
+    # df_pos_subset is already canonicalized (A < B)
     pos_keys = set(df_pos_subset['drug_a'].astype(str) + "|" + df_pos_subset['drug_b'].astype(str))
-    valid_mask = ~cand_keys.isin(pos_keys)
-
-    valid_a = candidates_a[valid_mask]
-    valid_b = candidates_b[valid_mask]
-
-    num_available = len(valid_a)
-    print(f"[{mode}] Available Negatives: {num_available} (Needed: {n_needed})")
 
     rng = np.random.default_rng(seed)
 
-    if num_available <= n_needed:
-        if num_available < n_needed:
-            print(f"[{mode}] WARNING: Insufficient negatives. Returning ALL available.")
-        final_a = valid_a
-        final_b = valid_b
-    else:
-        chosen_idx = rng.choice(num_available, size=n_needed, replace=False)
-        final_a = valid_a[chosen_idx]
-        final_b = valid_b[chosen_idx]
+    # 2. Oversample to handle collisions and existing positives in one shot
+    # 2.5x oversampling is generally safe for sparse graphs; it avoids the need for a 'while' loop.
+    n_sample = int(n_needed * 2.5)
 
+    # 3. Generate Random Indices (Vectorized)
+    idx_a = rng.integers(0, len(anchors), size=n_sample)
+    idx_b = rng.integers(0, len(background), size=n_sample)
+
+    cand_a = anchors[idx_a]
+    cand_b = background[idx_b]
+
+    # 4. Remove Self-Loops (Vectorized)
+    mask_diff = cand_a != cand_b
+    cand_a = cand_a[mask_diff]
+    cand_b = cand_b[mask_diff]
+
+    # 5. Canonicalize (Vectorized)
+    # Ensures (A, B) and (B, A) are treated as the same edge
+    swap_mask = cand_a > cand_b
+    cand_a[swap_mask], cand_b[swap_mask] = cand_b[swap_mask], cand_a[swap_mask]
+
+    # 6. Vectorized Deduplication & Positive Filtering
+    # Create composite keys for fast vectorized comparison
+    cand_keys = pd.Series(cand_a).astype(str) + "|" + pd.Series(cand_b).astype(str)
+
+    # Boolean mask: Keep if NOT duplicate internally AND NOT in existing positives
+    # ~cand_keys.duplicated() keeps the first occurrence
+    # .isin() on a set is highly optimized in Pandas
+    valid_mask = (~cand_keys.duplicated()) & (~cand_keys.isin(pos_keys))
+
+    final_a = cand_a[valid_mask]
+    final_b = cand_b[valid_mask]
+
+    print(f"[{mode}] Generated {len(final_a)} valid negatives (Needed: {n_needed})")
+
+    # 7. Slice to exact number
+    if len(final_a) > n_needed:
+        final_a = final_a[:n_needed]
+        final_b = final_b[:n_needed]
+    elif len(final_a) < n_needed:
+        print(f"[{mode}] WARNING: Insufficient negatives generated. Returning all available.")
+
+    # 8. Build Result
     id_to_smiles = all_drugs_df.set_index('id')['smiles'].to_dict()
 
     res_df = pd.DataFrame({
