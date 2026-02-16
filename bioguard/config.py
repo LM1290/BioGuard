@@ -6,6 +6,7 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
 
 # --- DATA HYPERPARAMETERS ---
+DATA_VERSION = "v18"
 RANDOM_SEED = 42
 TRAIN_NEG_RATIO = 1.0
 TEST_NEG_RATIO = 9.0

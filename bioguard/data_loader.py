@@ -12,12 +12,13 @@ from rdkit.Chem.MolStandardize import rdMolStandardize
 from joblib import Parallel, delayed
 from sklearn.model_selection import train_test_split
 from collections import defaultdict
+from .config import DATA_VERSION
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 
 # Bump version to v17 to ensure fresh clean build with names preserved
 def get_cache_path(split_method):
-    return os.path.join(CACHE_DIR, f'twosides_{split_method}_v17_clean.parquet')
+    return os.path.join(CACHE_DIR, f'twosides_{split_method}_{DATA_VERSION}_clean.parquet')
 
 def _generate_scaffold(smiles):
     mol = Chem.MolFromSmiles(smiles)
