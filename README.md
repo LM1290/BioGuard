@@ -130,6 +130,6 @@ python -m bioguard.train_lgbm
 ## 6. Technical Debt
 
 * **GPU Utilization:** Currently, torch.profiler shows GPU underutilization. Moving to LMDB for data retrieval to maximize training velocity.
-
+* **Memory Management:** Currently loads all graphs into RAM, which is incompatible with large-scale datasets. Engineering move to LMDB.
 
 ---
