@@ -21,29 +21,44 @@ os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 class BioGuardPretrain(nn.Module):
     """
-    Wrapper model that uses the EXACT SAME encoder structure as BioGuardGAT.
+    Wrapper model that matches the NEW BioGuardGAT structure.
+    Structure: AtomEncoder -> GATv2Conv -> Linear (Predict Masked Atom)
     """
 
     def __init__(self, node_dim=NODE_DIM, edge_dim=EDGE_DIM, embedding_dim=128, heads=4):
         super().__init__()
 
-        # This matches self.conv1 in BioGuardGAT
+        # 1. Atom Encoder (MUST MATCH BioGuardGAT)
+        # R^41 -> R^128
+        self.atom_encoder = nn.Sequential(
+            nn.Linear(node_dim, embedding_dim),
+            nn.BatchNorm1d(embedding_dim),
+            nn.ReLU()
+        )
+
+        # 2. GAT Layer
+        # Input is now embedding_dim (128), NOT node_dim
         self.conv1 = GATv2Conv(
-            node_dim,
+            embedding_dim,
             embedding_dim,
             heads=heads,
             dropout=0.4,
             edge_dim=edge_dim
         )
 
-        # Decoder: Predicts Atom Type (First 24 features in your featurizer)
+        # 3. Decoder: Predicts Atom Type from the Graph Embedding
         # Input: Output of Conv1 (embedding_dim * heads)
+        # Output: Original Atom Types (24 classes for C, N, O, etc.)
         self.lin_pred = nn.Linear(embedding_dim * heads, 24)
 
     def forward(self, x, edge_index, edge_attr):
-        # We only run the first layer (Local Chemistry)
+        # 1. Project Raw Features
+        x = self.atom_encoder(x)
+
+        # 2. Convolve
         x = self.conv1(x, edge_index, edge_attr=edge_attr)
-        # No activation here, raw logits for classification
+
+        # 3. Predict Identity
         return self.lin_pred(x)
 
 
@@ -52,8 +67,7 @@ def mask_nodes(batch, mask_ratio=0.15):
     Masks node features for self-supervised learning.
     """
     # 1. Identify True Atom Type (Label)
-    # Your featurizer puts atom type one-hot in the first 24 columns
-    # We use argmax to turn One-Hot back into an Integer Class (0-23)
+    # The first 24 columns are the One-Hot Atom Type
     atom_types = batch.x[:, :24].argmax(dim=1)
 
     # 2. Select Nodes to Mask
@@ -63,8 +77,8 @@ def mask_nodes(batch, mask_ratio=0.15):
     # 3. Create Targets
     y_target = atom_types[mask]
 
-    # 4. Mask Features (Set ALL features to 0 for masked nodes)
-    # This forces the GAT to look at neighbors to guess the atom
+    # 4. Mask Features
+    # We zero out the features for the masked nodes so the model relies on neighbors
     batch.x[mask] = 0.0
 
     return batch, y_target, mask
@@ -75,13 +89,11 @@ def run_pretraining(args):
     print(f"Device: {device}")
 
     print("--- 1. Loading Data for Pretraining ---")
-    # We use 'random' split to get maximum data variety for learning chemistry
     df = load_twosides_data(split_method='random')
-
-    # Use just the train set for now
     train_df = df[df['split'] == 'train']
     dataset = BioGuardDataset(root='data', df=train_df, split='pretrain')
 
+    # Num workers 0 is safer for in-memory datasets
     loader = PyGDataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
 
     print("--- 2. Initializing Model ---")
@@ -99,26 +111,19 @@ def run_pretraining(args):
 
         pbar = tqdm(loader, desc=f"Epoch {epoch}")
         for batch_data in pbar:
-            # batch_data is a tuple (batch_a, batch_b, label)
-            # We can use BOTH drugs to learn chemistry
-
+            # batch_data is (g_a, g_b, label)
             graphs = [batch_data[0], batch_data[1]]
-
             batch_loss = 0
 
             for g in graphs:
                 g = g.to(device)
-
-                # Apply Masking
                 g_masked, y_target, mask_idx = mask_nodes(g)
 
-                if y_target.numel() == 0: continue  # Skip if no nodes masked
+                if y_target.numel() == 0: continue
 
-                # Forward
                 optimizer.zero_grad()
                 pred_logits = model(g_masked.x, g_masked.edge_index, g_masked.edge_attr)
 
-                # Loss (Only on masked nodes)
                 pred_masked = pred_logits[mask_idx]
                 loss = criterion(pred_masked, y_target)
 
@@ -127,7 +132,6 @@ def run_pretraining(args):
 
                 batch_loss += loss.item()
 
-                # Accuracy tracking
                 preds = pred_masked.argmax(dim=1)
                 total_correct += (preds == y_target).sum().item()
                 total_masked += y_target.size(0)
@@ -139,9 +143,14 @@ def run_pretraining(args):
         acc = total_correct / total_masked if total_masked > 0 else 0
         print(f"Epoch {epoch}: Loss={avg_loss:.4f} | Atom Prediction Acc={acc:.4f}")
 
-    # Save ONLY the encoder weights (conv1)
+    # --- SAVE LOGIC UPDATED ---
     print(f"Saving encoder weights to {PRETRAIN_PATH}...")
-    torch.save(model.conv1.state_dict(), PRETRAIN_PATH)
+    # We now save a dictionary containing BOTH the atom_encoder and conv1
+    state_dict = {
+        'atom_encoder': model.atom_encoder.state_dict(),
+        'conv1': model.conv1.state_dict()
+    }
+    torch.save(state_dict, PRETRAIN_PATH)
     print("Done!")
 
 

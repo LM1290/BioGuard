@@ -59,11 +59,11 @@ Standard datasets (TWOSIDES) suffer from **Hub Bias** (e.g., Warfarin interacts 
 
 Evaluation performed on a held-out test set of **entirely unseen molecular scaffolds**.
 
-| Model | Architecture | ROC-AUC | PR-AUC | Recall (Sensitivity) | Role |
-| :--- | :--- | :--- | :--- | :--- | :--- |
+| Model | Architecture | ROC-AUC  | PR-AUC   | Recall (Sensitivity) | Role |
+| :--- | :--- |:---------|:---------| :--- | :--- |
 | **LightGBM (Hybrid)** | Gradient Boosting | **0.71** | **0.43** | 0.66 | **Best Baseline.** Precision-optimized. |
-| **BioGuard GATv2** | Pre-trained GNN | 0.66 | 0.39 | **0.70** | **Safety Filter.** Catching 70% of toxic events in OOD space. |
-| *Naive GAT* | Graph Neural Net | 0.64 | 0.37 | 0.27 | *Failed Control (No Biological Context).* |
+| **BioGuard GATv2** | Pre-trained GNN | 0.67     | 0.40     | **0.70** | **Safety Filter.** Catching 70% of toxic events in OOD space. |
+| *Naive GAT* | Graph Neural Net | 0.64     | 0.37     | 0.27 | *Failed Control (No Biological Context).* |
 
 **Analysis:**
 *   The **LightGBM Hybrid** provides a **50% Signal Lift** over random screening (Baseline 0.28).

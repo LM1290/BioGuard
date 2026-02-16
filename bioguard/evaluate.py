@@ -19,7 +19,7 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 # Internal Imports
 from .model import BioGuardGAT
 from .data_loader import load_twosides_data
-from .enzyme import EnzymeManager  # <--- NEW IMPORT
+from .enzyme import EnzymeManager
 # Import the Cached Dataset class we defined in train.py
 from bioguard.train import BioGuardDataset
 
@@ -44,38 +44,45 @@ def evaluate_model(override_split=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    # 1. Load Metadata (The Source of Truth)
     meta = load_metadata()
-    train_node_dim = meta.get('node_dim', 41)
+    if not meta:
+        print(f"[WARNING] No metadata found at {META_PATH}. Using defaults (Risk of Mismatch!).")
+
+    # Architecture Params
+    node_dim = meta.get('node_dim', 41)
+    edge_dim = meta.get('edge_dim', 6)
+    embedding_dim = meta.get('embedding_dim', 128)  # <--- FIXED
+    heads = meta.get('heads', 4)  # <--- FIXED
+
+    # Training Params
     train_split = meta.get('split_type', 'cold')
-    threshold = meta.get('threshold', 0.5)
+    threshold = meta.get('threshold', 0.2)
 
     # Allow overriding the split (e.g., testing on 'random' even if trained on 'cold')
     split_type = override_split if override_split else train_split
 
     print("--- BioGuard Evaluation ---")
-    print(f"Model Node Dim: {train_node_dim}")
+    print(f"Architecture: Dim={embedding_dim}, Heads={heads}")
     print(f"Eval Split:   {split_type.upper()}")
     print(f"Threshold:    {threshold:.4f}")
 
-    # 1. Load Data
+    # 2. Load Data
     print("\nLoading data...")
     df = load_twosides_data(split_method=split_type)
-
-    # We evaluate on the TEST set of the requested split
     test_df = df[df['split'] == 'test'].reset_index(drop=True)
 
-    # --- NEW: Detect Enzyme Dimension ---
-    # We must initialize the manager to know how many features (60) were used
+    # 3. Detect Enzyme Dimension
     enzyme_manager = EnzymeManager(allow_degraded=True)
     enzyme_dim = enzyme_manager.vector_dim
     print(f"Enzyme Features: {enzyme_dim}")
-    # ------------------------------------
 
-    # 2. Initialize Model
-    # FIXED: Passed enzyme_dim to constructor so shape matches checkpoint
+    # 4. Initialize Model (Dynamically)
     model = BioGuardGAT(
-        node_dim=train_node_dim,
-        edge_dim=6,
+        node_dim=node_dim,
+        edge_dim=edge_dim,
+        embedding_dim=embedding_dim,  # <--- FIXED
+        heads=heads,  # <--- FIXED
         enzyme_dim=enzyme_dim
     ).to(device)
 
@@ -89,21 +96,19 @@ def evaluate_model(override_split=None):
         print("[OK] Model weights loaded successfully")
     except Exception as e:
         print(f"[ERROR] Failed to load weights: {e}")
+        print("HINT: Did you change embedding_dim or heads without updating metadata?")
         sys.exit(1)
 
     model.eval()
 
-    # 3. Load Calibrator (Optional)
+    # 5. Load Calibrator
     calibrator = None
     if os.path.exists(CALIBRATOR_PATH):
         calibrator = joblib.load(CALIBRATOR_PATH)
         print("[OK] Calibrator loaded")
 
-    # 4. Initialize Dataset (RAM Cached)
-    # We reuse the class from train.py to get the same caching benefits
+    # 6. Initialize Dataset
     test_dataset = BioGuardDataset(root=DATA_DIR, df=test_df, split='test')
-
-    # DataLoader (num_workers=0 is fastest for in-memory data)
     test_loader = PyGDataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=0)
 
     print(f"[Test] Running inference on {len(test_dataset)} pairs...")
@@ -126,8 +131,7 @@ def evaluate_model(override_split=None):
     y_true = np.array(y_true)
     y_raw_probs = np.array(y_raw_probs)
 
-    # 5. Calculate Metrics
-    # Standard threshold 0.5 for raw predictions
+    # 7. Metrics
     y_pred = (y_raw_probs >= 0.5).astype(int)
 
     roc_auc = roc_auc_score(y_true, y_raw_probs)
@@ -137,7 +141,6 @@ def evaluate_model(override_split=None):
     rec = recall_score(y_true, y_pred, zero_division=0)
     f1 = f1_score(y_true, y_pred, zero_division=0)
 
-    # Specificity = TN / (TN + FP)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 

@@ -154,6 +154,8 @@ def run_training(args):
     print(f"Device: {device}")
 
     # 2. Load Data
+    # NOTE: To make this a true "Asset", this function would read args.data_path
+    # For now, we still rely on the internal loader per your current codebase state.
     df = load_twosides_data(split_method=args.split)
 
     train_df = df[df['split'] == 'train']
@@ -164,7 +166,6 @@ def run_training(args):
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
     # 4. DataLoaders
-    # num_workers=0 is crucial for in-memory datasets to avoid fork overhead/copying
     train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
@@ -173,28 +174,46 @@ def run_training(args):
     enzyme_dim = enzyme_manager.vector_dim
 
     print(f"Initializing BioGuardGAT with Enzyme Dim: {enzyme_dim}")
+    print(f"Arch: Node={NODE_DIM}, Emb={args.embedding_dim}, Heads={args.heads}")
 
     model = BioGuardGAT(
         node_dim=NODE_DIM,
         edge_dim=EDGE_DIM,
+        embedding_dim=args.embedding_dim,
+        heads=args.heads,
         enzyme_dim=enzyme_dim
     ).to(device)
 
-    # --- PRE-TRAINING INTEGRATION ---
+    # --- PRE-TRAINING INTEGRATION (UPDATED FOR METABOLIC INJECTION) ---
     pretrain_path = os.path.join(ARTIFACT_DIR, 'gat_encoder_weights.pt')
     if os.path.exists(pretrain_path):
         print(f"Loading pretrained encoder from {pretrain_path}...")
         try:
-            encoder_weights = torch.load(pretrain_path, map_location=device)
-            # Load weights into the first GAT layer (encoder)
-            model.conv1.load_state_dict(encoder_weights, strict=True)
+            checkpoint = torch.load(pretrain_path, map_location=device)
+
+            # Support for New "Metabolic Injection" Format
+            if isinstance(checkpoint, dict) and 'atom_encoder' in checkpoint:
+                print("Detected Metabolic Injection Checkpoint (v2). Loading AtomEncoder + GAT.")
+                model.atom_encoder.load_state_dict(checkpoint['atom_encoder'])
+                model.conv1.load_state_dict(checkpoint['conv1'])
+            # Support for Legacy Format (Backwards Compatibility)
+            elif isinstance(checkpoint, dict) and 'conv1' not in checkpoint:
+                # This assumes the old checkpoint was just the state_dict of conv1 directly
+                print("WARNING: Detected Legacy Checkpoint (v1). Weights may mismatch new architecture.")
+                try:
+                    model.conv1.load_state_dict(checkpoint, strict=False)
+                except:
+                    print("Legacy load failed. Ignoring.")
+            else:
+                print("Checkpoint format unrecognized. Skipping pretrain load.")
+
             print("Pretrained weights loaded successfully! (Transfer Learning Activated)")
         except Exception as e:
             print(f"WARNING: Could not load pretrained weights: {e}")
             print("Continuing with random initialization...")
     else:
         print("No pretrained weights found. Training from scratch.")
-    # --------------------------------
+    # ------------------------------------------------------------------
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
@@ -203,7 +222,7 @@ def run_training(args):
     print("\nStarting training loop (Optimizing for AUPRC)...")
 
     best_val_auprc = -1.0
-    patience = 8
+    patience = args.patience
     counter = 0
 
     for epoch in range(1, args.epochs + 1):
@@ -224,6 +243,8 @@ def run_training(args):
                 'node_dim': NODE_DIM,
                 'edge_dim': EDGE_DIM,
                 'enzyme_dim': enzyme_dim,
+                'embedding_dim': args.embedding_dim,
+                'heads': args.heads,
                 'split_type': args.split,
                 'best_epoch': epoch,
                 'val_auprc': val_auprc,
@@ -244,10 +265,20 @@ def run_training(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BioGuard Training")
+
+    # Training Hyperparameters
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--split', type=str, default='random', choices=['random', 'cold_drug'], help='Split method')
+    parser.add_argument('--patience', type=int, default=8, help='Early stopping patience')
+
+    # Model Architecture
+    parser.add_argument('--embedding_dim', type=int, default=128, help='Latent dimension for atoms')
+    parser.add_argument('--heads', type=int, default=4, help='Number of GAT attention heads')
+
+    # Data / Experiment
+    parser.add_argument('--split', type=str, default='random', choices=['random', 'scaffold', 'cold_drug'],
+                        help='Split method')
 
     args = parser.parse_args()
     run_training(args)
