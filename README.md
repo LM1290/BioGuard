@@ -129,7 +129,6 @@ python -m bioguard.train_lgbm
 ---
 ## 6. Technical Debt
 
-* **Stereochemistry:** Currently has blindspots in enantiomeric molecules. Exploring 3D conformational mapping and chiral-tag node features for resolution of R/S.
 * **GPU Utilization:** Currently, torch.profiler shows GPU underutilization. Moving to LMDB for data retrieval to maximize training velocity.
 
 
