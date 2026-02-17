@@ -133,3 +133,7 @@ python -m bioguard.train_lgbm
 * **Memory Management:** Currently loads all graphs into RAM, which is incompatible with large-scale datasets. Engineering move to LMDB.
 
 ---
+## 7. Production Roadmap
+* **Status:** BioGuard v2.2 utilizes a ChEMBL-anchored lookup for metabolic enzyme features (CYP450 profiles).
+* **Generalization:** While this proved that injection of biological priors recovers signal for OOD molecules, it struggles with Novel Chemical Entities for which enzymatic/metabolic activity is presently unknown.
+* **Fix:** Architecting end-to-end pipeline that intakes SMILES, predicts enzyme activity from graph topology, and establishes baseline for metabolic activity prior to risk prediction. Alpha prototype available in bioguard/cyp_predictor.
