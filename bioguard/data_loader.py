@@ -16,7 +16,7 @@ from .config import DATA_VERSION
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 
-# Bump version to v17 to ensure fresh clean build with names preserved
+
 def get_cache_path(split_method):
     return os.path.join(CACHE_DIR, f'twosides_{split_method}_{DATA_VERSION}_clean.parquet')
 

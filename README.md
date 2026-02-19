@@ -135,5 +135,8 @@ python -m bioguard.train_lgbm
 ---
 ## 7. Production Roadmap
 * **Status:** BioGuard v2.2 utilizes a ChEMBL-anchored lookup for metabolic enzyme features (CYP450 profiles).
-* **Generalization:** While this proved that injection of biological priors recovers signal for OOD molecules, it struggles with Novel Chemical Entities for which enzymatic/metabolic activity is presently unknown.
-* **Fix:** Architecting end-to-end pipeline that intakes SMILES, predicts enzyme activity from graph topology, and establishes baseline for metabolic activity prior to risk prediction. Alpha prototype available in bioguard/cyp_predictor.
+  * **Generalization:** While this proved that injection of biological priors recovers signal for OOD molecules, it struggles with Novel Chemical Entities for which enzymatic/metabolic activity is presently unknown.
+  * **Fix:** Architecting end-to-end pipeline that intakes SMILES, predicts enzyme activity from graph topology, and establishes baseline for metabolic activity prior to risk prediction. Alpha prototype available in bioguard/cyp_predictor.
+* **Class Imbalance:** Currently, the project test set uses a 70/30 negative:positive imbalance after the data cleaning process and scaffold-splitting.
+  * **Fix:** Move to a more clinically realistic 99/1 negative:positive imbalance with the implementation of Focal Loss to aggressively tune model for real-world use case.
+  * **Negative Mining:** Mine hard negatives (Tanimoto Similarity > 0.6) that produce opposite effects in DDI. Forces model to not over-generalize during testing.
