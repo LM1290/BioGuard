@@ -5,7 +5,7 @@ Molecular featurization module.
 import numpy as np
 import torch
 from rdkit import Chem, DataStructs
-from rdkit.Chem import rdFingerprintGenerator, Descriptors, rdchem
+from rdkit.Chem import rdFingerprintGenerator, Descriptors, rdchem, AllChem
 from torch_geometric.data import Data
 
 # --- 1. LEGACY FEATURIZER (FOR BASELINES) ---
@@ -39,8 +39,6 @@ class BioFeaturizer:
 # --- 2. NEW GRAPH FEATURIZER (FOR GAT) ---
 class GraphFeaturizer:
     def __init__(self):
-        # 1. Expanded Atom List (Periodic Table Rows 2-4 + Common Metals)
-        # We explicitly include an 'UNK' token at the end.
         self.atom_types = [
             'C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'I', 'P',
             'B', 'Si', 'Se', 'Na', 'K', 'Mg', 'Ca',
@@ -63,48 +61,71 @@ class GraphFeaturizer:
             rdchem.ChiralType.CHI_OTHER
         ]
 
-        # Node dim calculation:
-        # Atom Types (24) + Degree (6) + Hybrid (5) + Aromatic (1) + Charge (1) + Chiral (4)
-        # Total = 41
-        self.node_dim = len(self.atom_types) + 6 + len(self.hybridization) + 1 + 1 + len(self.chiral_types)
-
-        # Edge dim: 4 (Bond types) + 1 (Conjugated) + 1 (InRing) = 6
+        # Node dim: 24 + 6 + 5 + 1 + 1 + 4 + 1(3D Charge) = 42
+        self.node_dim = len(self.atom_types) + 6 + len(self.hybridization) + 1 + 1 + len(self.chiral_types) + 1
         self.edge_dim = 6
 
     def _one_hot(self, x, allowable_set):
-        """
-        Maps x to the one-hot vector.
-        Safe Mode: If x is not in allowable_set, maps to the LAST element (UNK).
-        """
         if x not in allowable_set:
-            x = allowable_set[-1] # Maps to 'UNK' or last element
+            x = allowable_set[-1]
         return list(map(lambda s: x == s, allowable_set))
+
+    def _get_3d_gasteiger_charges(self, mol, num_confs=1):
+        mol_3d = Chem.AddHs(mol)
+        ids = AllChem.EmbedMultipleConfs(mol_3d, numConfs=num_confs, params=AllChem.ETKDGv3())
+
+        if len(ids) == 0:
+            AllChem.ComputeGasteigerCharges(mol)
+            charges = []
+            for a in mol.GetAtoms():
+                try:
+                    val = float(a.GetProp('_GasteigerCharge'))
+                    charges.append(val if not np.isnan(val) and not np.isinf(val) else 0.0)
+                except:
+                    charges.append(0.0)
+            return charges
+
+        AllChem.ComputeGasteigerCharges(mol_3d)
+
+        charges = []
+        for i in range(mol.GetNumAtoms()):
+            atom = mol_3d.GetAtomWithIdx(i)
+            try:
+                val = float(atom.GetProp('_GasteigerCharge'))
+                charges.append(val if not np.isnan(val) and not np.isinf(val) else 0.0)
+            except:
+                charges.append(0.0)
+
+        return charges
 
     def smiles_to_graph(self, smiles):
         mol = Chem.MolFromSmiles(smiles)
         if not mol:
-            # Return empty graph with correct dimensions
             return Data(
                 x=torch.zeros((1, self.node_dim)),
                 edge_index=torch.empty((2, 0), dtype=torch.long),
                 edge_attr=torch.empty((0, self.edge_dim))
             )
 
-        # 1. Node Features (Atom properties)
+        # Generate 3D Gasteiger Charges
+        charges_3d = self._get_3d_gasteiger_charges(mol, num_confs=5)
+
+        # 1. Node Features
         x = []
-        for atom in mol.GetAtoms():
+        for i, atom in enumerate(mol.GetAtoms()):
             features = (
                     self._one_hot(atom.GetSymbol(), self.atom_types) +
                     self._one_hot(atom.GetDegree(), [0, 1, 2, 3, 4, 5]) +
                     self._one_hot(atom.GetHybridization(), self.hybridization) +
                     [1 if atom.GetIsAromatic() else 0] +
                     [atom.GetFormalCharge()] +
-                    self._one_hot(atom.GetChiralTag(), self.chiral_types)
+                    self._one_hot(atom.GetChiralTag(), self.chiral_types) +
+                    [charges_3d[i]]
             )
             x.append(features)
         x = torch.tensor(x, dtype=torch.float)
 
-        # 2. Edge Features (Bond properties)
+        # 2. Edge Features
         edge_indices = []
         edge_attrs = []
 
@@ -112,7 +133,6 @@ class GraphFeaturizer:
             i = bond.GetBeginAtomIdx()
             j = bond.GetEndAtomIdx()
 
-            # Feature vector
             bond_type = bond.GetBondType()
             feats = [
                 1 if bond_type == rdchem.BondType.SINGLE else 0,
@@ -123,10 +143,8 @@ class GraphFeaturizer:
                 1 if bond.IsInRing() else 0
             ]
 
-            # Add bidirectional edges
             edge_indices.append((i, j))
             edge_attrs.append(feats)
-
             edge_indices.append((j, i))
             edge_attrs.append(feats)
 
@@ -140,13 +158,7 @@ class GraphFeaturizer:
         return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
 
-# --- 3. HELPER FUNCTION (Fixes ImportError) ---
-# Global instance to avoid recreation overhead
 _global_featurizer = GraphFeaturizer()
 
 def drug_to_graph(smiles, drug_name=None):
-    """
-    Wrapper function that train.py expects.
-    Ignores drug_name (used for debugging only) and returns the Data object.
-    """
     return _global_featurizer.smiles_to_graph(smiles)

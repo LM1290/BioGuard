@@ -93,8 +93,7 @@ async def lifespan(app: FastAPI):
     app.state.executor = ProcessPoolExecutor(max_workers=2, initializer=worker_init)
 
     # 2. Load Enzyme Manager
-    # We load with allow_degraded=True to prevent startup crash
-    manager = EnzymeManager(allow_degraded=True)
+    manager = EnzymeManager(allow_degraded=False)
     app.state.enzyme_manager = manager
 
     # 3. Load Config & Resolve Dimensions

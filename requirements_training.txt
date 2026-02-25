@@ -13,3 +13,4 @@ tqdm==4.67.1
 uvicorn==0.38.0
 scikit-learn==1.2.2
 chembl_webresource_client
+lmdb

@@ -1,11 +1,14 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import os
 import json
 import logging
 import argparse
+import lmdb
+import pickle
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -15,7 +18,7 @@ from torch_geometric.data import Dataset
 from .model import BioGuardGAT
 from .data_loader import load_twosides_data
 from .enzyme import EnzymeManager
-from .config import NODE_DIM, EDGE_DIM
+from .config import NODE_DIM, EDGE_DIM, LMDB_DIR
 
 # --- CONFIG ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,64 +30,82 @@ META_PATH = os.path.join(ARTIFACT_DIR, 'metadata.json')
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Logger
 logger = logging.getLogger(__name__)
+
+
+class BioFocalLoss(nn.Module):
+    def __init__(self, alpha=0.95, gamma=2.0, reduction='mean'):
+        """
+        Focal Loss for Imbalanced DDI Tasks (BioGuard V3.0)
+        """
+        super(BioFocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-bce_loss)
+        alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 class BioGuardDataset(Dataset):
     """
-    In-Memory Dataset with RAM Caching for maximum speed.
-    Stores data as tuples: (Graph_A, Graph_B, Label)
+    LMDB-Backed Dataset.
+    Loads cached PyG graphs from disk and dynamically attaches Enzyme vectors.
     """
 
     def __init__(self, root, df, split='train', transform=None, pre_transform=None):
         self.df = df.reset_index(drop=True)
         self.split = split
-        # Enzyme Manager handles the biological context lookup
+        self.lmdb_path = LMDB_DIR
+        self.env = None
         self.enzyme_manager = EnzymeManager(allow_degraded=True)
-        self.cached_data = []
         super().__init__(root, transform, pre_transform)
-
-        self._process_in_ram()
 
     @property
     def processed_file_names(self):
         return ['not_used.pt']
 
-    def _process_in_ram(self):
-        """
-        Converts the dataframe into a list of PyG Data objects stored in self.cached_data
-        """
-        # Lazy import to avoid circular dependencies
-        from .featurizer import drug_to_graph
-
-        print(f"[{self.split}] Processing {len(self.df)} graphs (Parallelized)...")
-
-        data_list = []
-
-        # We iterate and create graph objects once, keeping them in RAM.
-        for idx, row in tqdm(self.df.iterrows(), total=len(self.df)):
-            # Drug A
-            g_a = drug_to_graph(row['smiles_a'], row['drug_a'])
-            g_a.enzyme_a = torch.tensor([self.enzyme_manager.get_vector(row['drug_a'])], dtype=torch.float)
-
-            # Drug B
-            g_b = drug_to_graph(row['smiles_b'], row['drug_b'])
-            g_b.enzyme_b = torch.tensor([self.enzyme_manager.get_vector(row['drug_b'])], dtype=torch.float)
-
-            label = torch.tensor([float(row['label'])], dtype=torch.float)
-
-            # Store as tuple (Lightweight)
-            data_list.append((g_a, g_b, label))
-
-        self.cached_data = data_list
-        print(f"[{self.split}] Successfully processed {len(data_list)} pairs.")
+    def _init_db(self):
+        # Lazy initialization for DataLoader multiprocess safety
+        self.env = lmdb.open(
+            self.lmdb_path,
+            readonly=True,
+            lock=False,
+            readahead=False,
+            meminit=False
+        )
 
     def len(self):
         return len(self.df)
 
     def get(self, idx):
-        return self.cached_data[idx]
+        if self.env is None:
+            self._init_db()
+
+        row = self.df.iloc[idx]
+
+        # Load base graphs from LMDB
+        with self.env.begin(write=False) as txn:
+            data_a = pickle.loads(txn.get(row['smiles_a'].encode('utf-8')))
+            data_b = pickle.loads(txn.get(row['smiles_b'].encode('utf-8')))
+
+        # Dynamically attach Enzyme Vectors based on the specific drug IDs
+        data_a.enzyme_a = torch.tensor([self.enzyme_manager.get_vector(row['drug_a'])], dtype=torch.float)
+        data_b.enzyme_b = torch.tensor([self.enzyme_manager.get_vector(row['drug_b'])], dtype=torch.float)
+
+        label = torch.tensor([float(row['label'])], dtype=torch.float)
+
+        return data_a, data_b, label
 
 
 def train_epoch(model, loader, optimizer, criterion, device):
@@ -92,18 +113,14 @@ def train_epoch(model, loader, optimizer, criterion, device):
     total_loss = 0
 
     for batch_data in loader:
-        # Unpack tuple from DataLoader
         batch_a = batch_data[0].to(device)
         batch_b = batch_data[1].to(device)
-        batch_y = batch_data[2].to(device)  # Shape [Batch, 1]
+        batch_y = batch_data[2].to(device)
 
         optimizer.zero_grad()
-
-        # Forward Pass
         logits = model(batch_a, batch_b)
         loss = criterion(logits, batch_y)
 
-        # Backward Pass
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -136,12 +153,9 @@ def validate(model, loader, criterion, device):
     y_true = np.array(y_true)
     y_probs = np.array(y_probs)
 
-    # METRICS
-    # AUPRC is the primary metric for imbalanced classification
     auprc = average_precision_score(y_true, y_probs)
     roc_auc = roc_auc_score(y_true, y_probs)
 
-    # Helper F1 for logging (using 0.5 threshold)
     y_pred = (y_probs >= 0.5).astype(int)
     f1 = f1_score(y_true, y_pred, zero_division=0)
 
@@ -149,27 +163,19 @@ def validate(model, loader, criterion, device):
 
 
 def run_training(args):
-    # 1. Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # 2. Load Data
-    # NOTE: To make this a true "Asset", this function would read args.data_path
-    # For now, we still rely on the internal loader per your current codebase state.
     df = load_twosides_data(split_method=args.split)
-
     train_df = df[df['split'] == 'train']
     val_df = df[df['split'] == 'val']
 
-    # 3. Create Datasets
     train_dataset = BioGuardDataset(root=DATA_DIR, df=train_df, split='train')
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
-    # 4. DataLoaders
     train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    # 5. Model Initialization
     enzyme_manager = EnzymeManager(allow_degraded=True)
     enzyme_dim = enzyme_manager.vector_dim
 
@@ -184,45 +190,37 @@ def run_training(args):
         enzyme_dim=enzyme_dim
     ).to(device)
 
-    # --- PRE-TRAINING INTEGRATION (UPDATED FOR METABOLIC INJECTION) ---
     pretrain_path = os.path.join(ARTIFACT_DIR, 'gat_encoder_weights.pt')
     if os.path.exists(pretrain_path):
         print(f"Loading pretrained encoder from {pretrain_path}...")
         try:
             checkpoint = torch.load(pretrain_path, map_location=device)
-
-            # Support for New "Metabolic Injection" Format
             if isinstance(checkpoint, dict) and 'atom_encoder' in checkpoint:
                 print("Detected Metabolic Injection Checkpoint (v2). Loading AtomEncoder + GAT.")
                 model.atom_encoder.load_state_dict(checkpoint['atom_encoder'])
                 model.conv1.load_state_dict(checkpoint['conv1'])
-            # Support for Legacy Format (Backwards Compatibility)
             elif isinstance(checkpoint, dict) and 'conv1' not in checkpoint:
-                # This assumes the old checkpoint was just the state_dict of conv1 directly
                 print("WARNING: Detected Legacy Checkpoint (v1). Weights may mismatch new architecture.")
                 try:
                     model.conv1.load_state_dict(checkpoint, strict=False)
                 except:
-                    print("Legacy load failed. Ignoring.")
-            else:
-                print("Checkpoint format unrecognized. Skipping pretrain load.")
-
+                    pass
             print("Pretrained weights loaded successfully! (Transfer Learning Activated)")
         except Exception as e:
             print(f"WARNING: Could not load pretrained weights: {e}")
-            print("Continuing with random initialization...")
     else:
         print("No pretrained weights found. Training from scratch.")
-    # ------------------------------------------------------------------
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
 
-    # 6. Training Loop
+    # ---------------------------------------------------------
+    # Integrate BioFocalLoss
+    # (Adjust alpha depending on exact pos/neg ratio. 0.95 is good for 1:9)
+    # ---------------------------------------------------------
+    criterion = BioFocalLoss(alpha=0.95, gamma=2.0)
+
     print("\nStarting training loop (Optimizing for AUPRC)...")
-
     best_val_auprc = -1.0
-    patience = args.patience
     counter = 0
 
     for epoch in range(1, args.epochs + 1):
@@ -232,13 +230,11 @@ def run_training(args):
         print(f"Epoch {epoch}: Train Loss={train_loss:.4f} | Val Loss={val_loss:.4f}")
         print(f"    -> Val AUPRC: {val_auprc:.4f} | ROC-AUC: {val_roc:.4f} | F1: {val_f1:.4f}")
 
-        # TARGET: Maximize AUPRC
         if val_auprc > best_val_auprc:
             best_val_auprc = val_auprc
             counter = 0
             torch.save(model.state_dict(), MODEL_PATH)
 
-            # Save Metadata
             meta = {
                 'node_dim': NODE_DIM,
                 'edge_dim': EDGE_DIM,
@@ -257,26 +253,20 @@ def run_training(args):
             print("    -> Model saved (New Best AUPRC).")
         else:
             counter += 1
-            print(f"    -> Patience {counter}/{patience}")
-            if counter >= patience:
+            print(f"    -> Patience {counter}/{args.patience}")
+            if counter >= args.patience:
                 print("Early stopping triggered.")
                 break
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BioGuard Training")
-
-    # Training Hyperparameters
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--patience', type=int, default=8, help='Early stopping patience')
-
-    # Model Architecture
     parser.add_argument('--embedding_dim', type=int, default=128, help='Latent dimension for atoms')
     parser.add_argument('--heads', type=int, default=4, help='Number of GAT attention heads')
-
-    # Data / Experiment
     parser.add_argument('--split', type=str, default='random', choices=['random', 'scaffold', 'cold_drug'],
                         help='Split method')
 

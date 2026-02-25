@@ -9,10 +9,7 @@ class BioGuardGAT(nn.Module):
     def __init__(self, node_dim=NODE_DIM, edge_dim=EDGE_DIM, embedding_dim=128, heads=4, enzyme_dim=0):
         super().__init__()
 
-        # --- 1. Atom Encoder (The Fix) ---
-        # Projects discrete "raw" features (One-Hot) into a continuous latent space.
-        # This prevents the enzyme vector from "corrupting" the atom identity.
-        # R^41 -> R^128
+        # Atom Encoder
         self.atom_encoder = nn.Sequential(
             nn.Linear(node_dim, embedding_dim),
             nn.BatchNorm1d(embedding_dim),
