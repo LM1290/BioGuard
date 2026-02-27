@@ -9,6 +9,7 @@ import logging
 import argparse
 import lmdb
 import pickle
+import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -18,7 +19,7 @@ from torch_geometric.data import Dataset
 from .model import BioGuardGAT
 from .data_loader import load_twosides_data
 from .enzyme import EnzymeManager
-from .config import NODE_DIM, EDGE_DIM, LMDB_DIR
+from .config import NODE_DIM, EDGE_DIM, LMDB_DIR, NUM_WORKERS
 
 # --- CONFIG ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class BioFocalLoss(nn.Module):
-    def __init__(self, alpha=0.95, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=0.7, gamma=2.0, reduction='mean'):
         """
         Focal Loss for Imbalanced DDI Tasks (BioGuard V3.0)
         """
@@ -59,60 +60,88 @@ class BioFocalLoss(nn.Module):
 
 class BioGuardDataset(Dataset):
     """
-    LMDB-Backed Dataset.
-    Loads cached PyG graphs from disk and dynamically attaches Enzyme vectors.
+    Hybrid LMDB-RAM Dataset.
+    Loads both the unique 3D graphs and the Enzyme Vectors into RAM ONCE,
+    eliminating all disk I/O and CPU bottlenecks during training.
     """
 
     def __init__(self, root, df, split='train', transform=None, pre_transform=None):
         self.df = df.reset_index(drop=True)
         self.split = split
         self.lmdb_path = LMDB_DIR
-        self.env = None
         self.enzyme_manager = EnzymeManager(allow_degraded=True)
+
+        # --- RAM Caches ---
+        self.graph_cache = {}
+        self.enzyme_cache = {}
+        self._preload_ram_caches()
+
         super().__init__(root, transform, pre_transform)
 
     @property
     def processed_file_names(self):
         return ['not_used.pt']
 
-    def _init_db(self):
-        # Lazy initialization for DataLoader multiprocess safety
-        self.env = lmdb.open(
-            self.lmdb_path,
-            readonly=True,
-            lock=False,
-            readahead=False,
-            meminit=False
-        )
+    def _preload_ram_caches(self):
+        # 1. Preload 3D Graphs from LMDB
+        unique_smiles = pd.concat([self.df['smiles_a'], self.df['smiles_b']]).unique()
+        print(f"[{self.split}] Pre-loading {len(unique_smiles)} unique 3D graphs from LMDB into RAM...")
+
+        env = lmdb.open(self.lmdb_path, readonly=True, lock=False)
+        with env.begin(write=False) as txn:
+            for smiles in unique_smiles:
+                raw_bytes = txn.get(smiles.encode('utf-8'))
+                if raw_bytes is not None:
+                    self.graph_cache[smiles] = pickle.loads(raw_bytes)
+                else:
+                    raise ValueError(f"SMILES missing from LMDB: {smiles}")
+        env.close()
+
+        # 2. Preload Enzyme Vectors
+        unique_drugs = pd.concat([self.df['drug_a'], self.df['drug_b']]).unique()
+        print(f"[{self.split}] Pre-loading {len(unique_drugs)} enzyme vectors into RAM...")
+        for drug in unique_drugs:
+            self.enzyme_cache[drug] = torch.tensor([self.enzyme_manager.get_vector(drug)], dtype=torch.float)
 
     def len(self):
         return len(self.df)
 
     def get(self, idx):
-        if self.env is None:
-            self._init_db()
-
         row = self.df.iloc[idx]
 
-        # Load base graphs from LMDB
-        with self.env.begin(write=False) as txn:
-            data_a = pickle.loads(txn.get(row['smiles_a'].encode('utf-8')))
-            data_b = pickle.loads(txn.get(row['smiles_b'].encode('utf-8')))
+        # O(1) RAM Lookup
+        data_a = self.graph_cache[row['smiles_a']].clone()
+        data_b = self.graph_cache[row['smiles_b']].clone()
 
-        # Dynamically attach Enzyme Vectors based on the specific drug IDs
-        data_a.enzyme_a = torch.tensor([self.enzyme_manager.get_vector(row['drug_a'])], dtype=torch.float)
-        data_b.enzyme_b = torch.tensor([self.enzyme_manager.get_vector(row['drug_b'])], dtype=torch.float)
+        # O(1) RAM Lookup for Enzymes (Fixes the CPU bottleneck)
+        data_a.enzyme_a = self.enzyme_cache[row['drug_a']]
+        data_b.enzyme_b = self.enzyme_cache[row['drug_b']]
 
         label = torch.tensor([float(row['label'])], dtype=torch.float)
 
         return data_a, data_b, label
 
 
-def train_epoch(model, loader, optimizer, criterion, device):
+def train_epoch(model, loader, optimizer, criterion, device, epoch_num, run_profiler=False):
     model.train()
     total_loss = 0
 
-    for batch_data in loader:
+    # TQDM Progress Bar
+    pbar = tqdm(loader, desc=f"Epoch {epoch_num} [Train]")
+
+    if run_profiler:
+        # Profiler Setup: Waits 1 step, warms up 1 step, records 3 steps
+        prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(os.path.join(ARTIFACT_DIR, 'profiler_logs')),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        )
+        prof.start()
+
+    for batch_data in pbar:
         batch_a = batch_data[0].to(device)
         batch_b = batch_data[1].to(device)
         batch_y = batch_data[2].to(device)
@@ -127,17 +156,27 @@ def train_epoch(model, loader, optimizer, criterion, device):
 
         total_loss += loss.item()
 
+        # Update progress bar with the current loss
+        pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+        if run_profiler:
+            prof.step()
+
+    if run_profiler:
+        prof.stop()
+        print(f"\n[Profiler Output Saved to {ARTIFACT_DIR}/profiler_logs]")
+
     return total_loss / len(loader)
 
 
-def validate(model, loader, criterion, device):
+def validate(model, loader, criterion, device, epoch_num):
     model.eval()
     total_loss = 0
     y_true = []
     y_probs = []
 
     with torch.no_grad():
-        for batch_data in loader:
+        for batch_data in tqdm(loader, desc=f"Epoch {epoch_num} [Val  ]"):
             batch_a = batch_data[0].to(device)
             batch_b = batch_data[1].to(device)
             batch_y = batch_data[2].to(device)
@@ -173,8 +212,8 @@ def run_training(args):
     train_dataset = BioGuardDataset(root=DATA_DIR, df=train_df, split='train')
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
-    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=NUM_WORKERS)
+    val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=NUM_WORKERS)
 
     enzyme_manager = EnzymeManager(allow_degraded=True)
     enzyme_dim = enzyme_manager.vector_dim
@@ -212,11 +251,6 @@ def run_training(args):
         print("No pretrained weights found. Training from scratch.")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-
-    # ---------------------------------------------------------
-    # Integrate BioFocalLoss
-    # (Adjust alpha depending on exact pos/neg ratio. 0.95 is good for 1:9)
-    # ---------------------------------------------------------
     criterion = BioFocalLoss(alpha=0.95, gamma=2.0)
 
     print("\nStarting training loop (Optimizing for AUPRC)...")
@@ -224,8 +258,11 @@ def run_training(args):
     counter = 0
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_auprc, val_roc, val_f1 = validate(model, val_loader, criterion, device)
+        # Run profiler ONLY on the first epoch to diagnose bottlenecks
+        run_prof = (epoch == 1)
+
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, epoch, run_profiler=run_prof)
+        val_loss, val_auprc, val_roc, val_f1 = validate(model, val_loader, criterion, device, epoch)
 
         print(f"Epoch {epoch}: Train Loss={train_loss:.4f} | Val Loss={val_loss:.4f}")
         print(f"    -> Val AUPRC: {val_auprc:.4f} | ROC-AUC: {val_roc:.4f} | F1: {val_f1:.4f}")
