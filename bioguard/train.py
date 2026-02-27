@@ -35,20 +35,32 @@ logger = logging.getLogger(__name__)
 
 
 class BioFocalLoss(nn.Module):
-    def __init__(self, alpha=0.7, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=0.95, gamma=2.0, reduction='mean'):
         """
-        Focal Loss for Imbalanced DDI Tasks (BioGuard V3.0)
+        Numerically Stabilized Focal Loss for BioGuard V3.0.
+        Fixes NaN issues by clamping logits and adding epsilon stability.
         """
         super(BioFocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.eps = 1e-8
 
     def forward(self, inputs, targets):
+        inputs = torch.clamp(inputs, min=-10.0, max=10.0)
+
+        # 2. STABLE BCE: Use the built-in Log-Sum-Exp version
         bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        pt = torch.exp(-bce_loss)
+
+        # 3. PROBABILITY CALC: Get pt (probability of correct class)
+        # Using sigmoid(inputs) for the probability estimation
+        p = torch.sigmoid(inputs)
+        pt = targets * p + (1 - targets) * (1 - p)
+
+        # 4. FOCAL TERM: Apply alpha and the (1-pt)^gamma modulation
+        # Add epsilon to prevent 0^gamma if pt is exactly 1.0
         alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
-        focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
+        focal_loss = alpha_t * (1 - pt + self.eps) ** self.gamma * bce_loss
 
         if self.reduction == 'mean':
             return focal_loss.mean()
