@@ -216,7 +216,7 @@ def run_training(args):
     train_dataset = BioGuardDataset(root=DATA_DIR, df=train_df, split='train')
     val_dataset = BioGuardDataset(root=DATA_DIR, df=val_df, split='val')
 
-    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=NUM_WORKERS)
+    train_loader = PyGDataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=NUM_WORKERS,drop_last=True)
     val_loader = PyGDataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=NUM_WORKERS)
 
     enzyme_manager = EnzymeManager(allow_degraded=True)
