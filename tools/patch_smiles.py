@@ -15,7 +15,7 @@ def patch():
     print(f"Loaded {len(df_features)} rows from CSV.")
 
     # 2. Load the source Parquet to get SMILES
-    files = glob.glob("data/twosides_*_v17_clean.parquet")
+    files = glob.glob("data/twosides_*_v18_clean.parquet")
     if not files:
         print("Parquet file not found.")
         return
