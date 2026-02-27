@@ -8,7 +8,7 @@ import json
 import logging
 import argparse
 import lmdb
-import pickle
+import io
 import pandas as pd
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
@@ -57,12 +57,11 @@ class BioFocalLoss(nn.Module):
         else:
             return focal_loss
 
-
 class BioGuardDataset(Dataset):
     """
-    Hybrid LMDB-RAM Dataset.
-    Loads both the unique 3D graphs and the Enzyme Vectors into RAM ONCE,
-    eliminating all disk I/O and CPU bottlenecks during training.
+    Production LMDB-Backed Dataset.
+    Strictly utilizes the OS page cache via LMDB and native PyTorch
+    tensor decoding. Safe for massive datasets and multiprocess workers.
     """
 
     def __init__(self, root, df, split='train', transform=None, pre_transform=None):
@@ -71,10 +70,8 @@ class BioGuardDataset(Dataset):
         self.lmdb_path = LMDB_DIR
         self.enzyme_manager = EnzymeManager(allow_degraded=True)
 
-        # --- RAM Caches ---
-        self.graph_cache = {}
-        self.enzyme_cache = {}
-        self._preload_ram_caches()
+        # Must be initialized lazily to prevent deadlocks across DataLoader workers
+        self.env = None
 
         super().__init__(root, transform, pre_transform)
 
@@ -82,45 +79,52 @@ class BioGuardDataset(Dataset):
     def processed_file_names(self):
         return ['not_used.pt']
 
-    def _preload_ram_caches(self):
-        # 1. Preload 3D Graphs from LMDB
-        unique_smiles = pd.concat([self.df['smiles_a'], self.df['smiles_b']]).unique()
-        print(f"[{self.split}] Pre-loading {len(unique_smiles)} unique 3D graphs from LMDB into RAM...")
-
-        env = lmdb.open(self.lmdb_path, readonly=True, lock=False)
-        with env.begin(write=False) as txn:
-            for smiles in unique_smiles:
-                raw_bytes = txn.get(smiles.encode('utf-8'))
-                if raw_bytes is not None:
-                    self.graph_cache[smiles] = pickle.loads(raw_bytes)
-                else:
-                    raise ValueError(f"SMILES missing from LMDB: {smiles}")
-        env.close()
-
-        # 2. Preload Enzyme Vectors
-        unique_drugs = pd.concat([self.df['drug_a'], self.df['drug_b']]).unique()
-        print(f"[{self.split}] Pre-loading {len(unique_drugs)} enzyme vectors into RAM...")
-        for drug in unique_drugs:
-            self.enzyme_cache[drug] = torch.tensor([self.enzyme_manager.get_vector(drug)], dtype=torch.float)
+    def _init_db(self):
+        """
+        Initializes the LMDB environment inside the worker process.
+        readahead=False is critical for random access performance in ML.
+        """
+        self.env = lmdb.open(
+            self.lmdb_path,
+            readonly=True,
+            lock=False,
+            readahead=False,
+            meminit=False
+        )
 
     def len(self):
         return len(self.df)
 
     def get(self, idx):
+        # Lazy DB initialization for num_workers > 0
+        if self.env is None:
+            self._init_db()
+
         row = self.df.iloc[idx]
+        smi_a = row['smiles_a']
+        smi_b = row['smiles_b']
 
-        # O(1) RAM Lookup
-        data_a = self.graph_cache[row['smiles_a']].clone()
-        data_b = self.graph_cache[row['smiles_b']].clone()
+        # 1. True LMDB Access (Hitting the OS Page Cache)
+        with self.env.begin(write=False) as txn:
+            raw_a = txn.get(smi_a.encode('utf-8'))
+            raw_b = txn.get(smi_b.encode('utf-8'))
 
-        # O(1) RAM Lookup for Enzymes (Fixes the CPU bottleneck)
-        data_a.enzyme_a = self.enzyme_cache[row['drug_a']]
-        data_b.enzyme_b = self.enzyme_cache[row['drug_b']]
+            if raw_a is None or raw_b is None:
+                raise KeyError(f"Missing SMILES in LMDB: {smi_a if raw_a is None else smi_b}")
+
+            # 2. Native PyTorch Deserialization
+            # weights_only=False is required for loading custom PyG Data objects
+            data_a = torch.load(io.BytesIO(raw_a), weights_only=False)
+            data_b = torch.load(io.BytesIO(raw_b), weights_only=False)
+
+        # 3. Dynamic Enzyme Inference (100% flat RAM usage)
+        # We use the LightGBM predictor via get_by_smiles to ensure NCEs are scored correctly
+        data_a.enzyme_a = torch.tensor([self.enzyme_manager.get_by_smiles(smi_a)], dtype=torch.float)
+        data_b.enzyme_b = torch.tensor([self.enzyme_manager.get_by_smiles(smi_b)], dtype=torch.float)
 
         label = torch.tensor([float(row['label'])], dtype=torch.float)
 
         return data_a, data_b, label
-
 
 def train_epoch(model, loader, optimizer, criterion, device, epoch_num, run_profiler=False):
     model.train()
