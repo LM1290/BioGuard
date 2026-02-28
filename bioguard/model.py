@@ -44,7 +44,8 @@ class BioGuardGAT(nn.Module):
             embedding_dim,
             heads=1,
             dropout=0.3,
-            edge_dim=edge_dim
+            edge_dim=edge_dim,
+            fill_value=0.0
         )
 
         # --- 4. Dimension Calculation ---

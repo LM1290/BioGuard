@@ -77,25 +77,37 @@ class BioGuardDataset(Dataset):
     """
 
     def __init__(self, root, df, split='train', transform=None, pre_transform=None):
-        self.df = df.reset_index(drop=True)
-        self.split = split
         self.lmdb_path = LMDB_DIR
+
+        # --- PRE-FILTER: Synchronize DataFrame with LMDB Cache ---
+        # Quickly check which SMILES actually exist in the LMDB database
+        env_check = lmdb.open(self.lmdb_path, readonly=True, lock=False)
+        with env_check.begin() as txn:
+            unique_smiles = pd.concat([df['smiles_a'], df['smiles_b']]).unique()
+            valid_smiles = set(s for s in unique_smiles if txn.get(s.encode('utf-8')) is not None)
+        env_check.close()
+
+        # Drop any pairs that contain a blacklisted/missing SMILES
+        df_clean = df[df['smiles_a'].isin(valid_smiles) & df['smiles_b'].isin(valid_smiles)]
+        dropped = len(df) - len(df_clean)
+        if dropped > 0:
+            print(f"[{split.upper()}] Dropped {dropped} invalid pairs to sync with LMDB cache.")
+
+        self.df = df_clean.reset_index(drop=True)
+        # ---------------------------------------------------------
+
+        self.split = split
         self.enzyme_manager = EnzymeManager(allow_degraded=True)
 
         # Must be initialized lazily to prevent deadlocks across DataLoader workers
         self.env = None
 
         super().__init__(root, transform, pre_transform)
-
     @property
     def processed_file_names(self):
         return ['not_used.pt']
 
     def _init_db(self):
-        """
-        Initializes the LMDB environment inside the worker process.
-        readahead=False is critical for random access performance in ML.
-        """
         self.env = lmdb.open(
             self.lmdb_path,
             readonly=True,

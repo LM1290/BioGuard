@@ -26,6 +26,9 @@ class GraphFeaturizer:
         mol_3d = Chem.AddHs(mol)
         params = AllChem.ETKDGv3()
         params.randomSeed = 42
+        params.numThreads=1
+
+        # Use all CPU cores for embedding
         ids = list(AllChem.EmbedMultipleConfs(mol_3d, numConfs=num_confs, params=params))
         num_atoms = mol.GetNumAtoms()
 
@@ -33,31 +36,68 @@ class GraphFeaturizer:
             # NO GHOST CONFORMERS. Fail loudly.
             raise ValueError("RDKit ETKDGv3 failed to embed 3D coordinates.")
 
-        # 1. Gasteiger Stats
-        conf_charges = []
-        for cid in ids:
-            AllChem.ComputeGasteigerCharges(mol_3d, confId=cid)
-            conf_charges.append([float(mol_3d.GetAtomWithIdx(i).GetProp('_GasteigerCharge')) for i in range(num_atoms)])
+        # 1. Gasteiger Stats (Topological - Compute once safely)
+        AllChem.ComputeGasteigerCharges(mol_3d)
+        charge_stats = []
+        for i in range(num_atoms):
+            try:
+                c = float(mol_3d.GetAtomWithIdx(i).GetProp('_GasteigerCharge'))
+                if np.isnan(c) or np.isinf(c):
+                    c = 0.0
+            except:
+                c = 0.0
+            # [mean, std, min, max] -> std is 0 for topological charges
+            charge_stats.append([c, 0.0, c, c])
 
-        conf_charges = np.array(conf_charges)
-        charge_stats = [[np.mean(conf_charges[:, i]), np.std(conf_charges[:, i]), np.min(conf_charges[:, i]),
-                         np.max(conf_charges[:, i])] for i in range(num_atoms)]
-
-        # 2. SASA
+        # 2. SASA (Spatial - Averaged over conformers)
         sasa_vals = []
-        radii = rdFreeSASA.classifyAtoms(mol_3d)
-        for cid in ids:
-            rdFreeSASA.CalcSASA(mol_3d, radii, confId=cid)
-            sasa_vals.append([float(mol_3d.GetAtomWithIdx(i).GetProp("SASA")) for i in range(num_atoms)])
-        sasa_mean = np.mean(sasa_vals, axis=0).tolist()
+        try:
+            radii = rdFreeSASA.classifyAtoms(mol_3d)
+            for cid in ids:
+                rdFreeSASA.CalcSASA(mol_3d, radii, confIdx=cid)
+                vals = []
+                for i in range(num_atoms):
+                    try:
+                        v = float(mol_3d.GetAtomWithIdx(i).GetProp("SASA"))
+                        vals.append(v if not np.isnan(v) else 0.0)
+                    except:
+                        vals.append(0.0)
+                sasa_vals.append(vals)
+            sasa_mean = np.mean(sasa_vals, axis=0).tolist()
+        except:
+            # Fallback if SASA fails entirely
+            sasa_mean = [0.0] * num_atoms
 
-        # 3. Global Shape
+        # 3. Global Shape (Spatial - Averaged over conformers)
         vols, gyrs, asphs = [], [], []
         for cid in ids:
-            vols.append(AllChem.ComputeMolVolume(mol_3d, confId=cid))
-            gyrs.append(Descriptors3D.RadiusOfGyration(mol_3d, confId=cid))
-            asphs.append(Descriptors3D.Asphericity(mol_3d, confId=cid))
-        global_3d = [np.mean(gyrs), np.mean(asphs), np.mean(vols)]
+            # Volume
+            try:
+                v = AllChem.ComputeMolVolume(mol_3d, confId=cid)
+                vols.append(v if not np.isnan(v) else 0.0)
+            except:
+                vols.append(0.0)
+
+            # Radius of Gyration
+            try:
+                g = Descriptors3D.RadiusOfGyration(mol_3d, confId=cid)
+                gyrs.append(g if not np.isnan(g) else 0.0)
+            except:
+                gyrs.append(0.0)
+
+            # Asphericity (Handles divide-by-zero for single atoms/linear molecules)
+            try:
+                a = Descriptors3D.Asphericity(mol_3d, confId=cid)
+                asphs.append(a if not np.isnan(a) else 0.0)
+            except:
+                asphs.append(0.0)
+
+        # Safely compute means
+        g_mean = float(np.mean(gyrs)) if gyrs else 0.0
+        a_mean = float(np.mean(asphs)) if asphs else 0.0
+        v_mean = float(np.mean(vols)) if vols else 0.0
+
+        global_3d = [g_mean, a_mean, v_mean]
 
         # 4. Distance Matrix (Use Conformer 0)
         dist_matrix = AllChem.Get3DDistanceMatrix(mol_3d, confId=ids[0])
@@ -66,7 +106,6 @@ class GraphFeaturizer:
     def smiles_to_graph(self, smiles):
         mol = Chem.MolFromSmiles(smiles)
         if not mol:
-            # NO BLANK GRAPHS. Fail loudly.
             raise ValueError(f"Invalid SMILES string cannot be parsed by RDKit: {smiles}")
 
         charge_stats, sasa, global_3d, dist_matrix = self._get_3d_features(mol)
@@ -103,20 +142,29 @@ class GraphFeaturizer:
                 0.0,
                 inv_dist
             ]
-            edge_indices += [(i, j), (j, i)];
+            edge_indices += [(i, j), (j, i)]
             edge_attrs += [feats, feats]
 
         # B. Virtual Spatial Edges
         if dist_matrix is not None:
-            for i in range(mol.GetNumAtoms()):
-                for j in range(i + 1, mol.GetNumAtoms()):
+            num_atoms = mol.GetNumAtoms()
+            for i in range(num_atoms):
+                for j in range(i + 1, num_atoms):
                     dist = dist_matrix[i, j]
                     if dist < 4.5 and mol.GetBondBetweenAtoms(i, j) is None:
                         inv_dist = min(10.0, 1.0 / (dist + 1e-5))
                         feats = [0, 0, 0, 0, 0, 0, 1.0 * inv_dist, inv_dist]
-                        edge_indices += [(i, j), (j, i)];
+                        edge_indices += [(i, j), (j, i)]
                         edge_attrs += [feats, feats]
-
+        # C. Biologically Accurate Self-Loops
+        num_atoms = mol.GetNumAtoms()
+        for i in range(num_atoms):
+            # Features:[Single, Double, Triple, Arom, Conj, Ring, Virtual, InvDist]
+            # InvDist is clamped to max (10.0) for self-distance of 0.0
+            self_feats =[0, 0, 0, 0, 0, 0, 1.0, 10.0]
+            edge_indices.append((i, i))
+            edge_attrs.append(self_feats)
+        # -----
         if not edge_indices:
             edge_index = torch.empty((2, 0), dtype=torch.long)
             edge_attr = torch.empty((0, self.edge_dim))

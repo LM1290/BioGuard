@@ -14,9 +14,9 @@ TEST_NEG_RATIO = 9.0
 
 # --- MODEL DIMENSIONS (Must match Featurizer) ---
 # Node Dim: Atom(24) + Degree(6) + Hybrid(5) + Aromatic(1) + Charge(1) + Chiral(4) = 41
-NODE_DIM = 42
+NODE_DIM = 46
 # Edge Dim: BondType(4) + Conjugated(1) + InRing(1) = 6
-EDGE_DIM = 6
+EDGE_DIM = 8
 
 # --- TRAINING HYPERPARAMETERS ---
 BATCH_SIZE = 128
