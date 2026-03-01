@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, recall_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, recall_score, confusion_matrix
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from bioguard.data_loader import load_twosides_data
@@ -51,8 +51,8 @@ def main():
         fp_b = fp_map.get(row['smiles_b'])
 
         # 2. Biological Features (Enzymes)
-        enz_a = enzyme_mgr.get_vector(row['drug_a'])
-        enz_b = enzyme_mgr.get_vector(row['drug_b'])
+        enz_a = enzyme_mgr.get_by_smiles(row['smiles_a'])
+        enz_b = enzyme_mgr.get_by_smiles(row['smiles_b'])
 
         # Concatenate: [FP_A, Enz_A, FP_B, Enz_B]
         return np.concatenate([fp_a, enz_a, fp_b, enz_b])
@@ -90,20 +90,23 @@ def main():
 
     # 6. Evaluate
     y_pred = clf.predict_proba(X_test)[:, 1]
+    y_pred_bin = (y_pred >= 0.5).astype(int)
     auc = roc_auc_score(y_test, y_pred)
     pr = average_precision_score(y_test, y_pred)
     acc = accuracy_score(y_test, (y_pred >= 0.5).astype(int))
     rec = recall_score(y_test, y_pred >= 0.5)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred_bin).ravel()
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
     print("\n" + "=" * 40)
     print(f"LGBM + ENZYMES RESULTS ({args.split.upper()})")
     print("=" * 40)
-    print(f"ROC-AUC: {auc:.4f}")
-    print(f"PR-AUC:  {pr:.4f}")
-    print(f"Accuracy: {acc:.4f}")
-    print(f"Recall:   {rec:.4f}")
+    print(f"ROC-AUC:     {auc:.4f}")
+    print(f"PR-AUC:      {pr:.4f}")
+    print(f"Accuracy:    {acc:.4f}")
+    print(f"Recall:      {rec:.4f}")
+    print(f"Specificity: {specificity:.4f}")  # <-- Added output
     print("=" * 40)
-
     # Save
     model_name = f'lgbm_baseline_{args.split}.pkl'
     joblib.dump(clf, os.path.join(ARTIFACT_DIR, model_name))

@@ -23,7 +23,7 @@ MODEL_SAVE_PATH = os.path.join(ARTIFACT_DIR, 'cyp_predictor.joblib')
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 
-# 1. PURE TOPOLOGY: Rip out PhysChem descriptors
+# 1. PURE TOPOLOGY:
 def get_fp_only(smiles, radius=2, n_bits=2048):
     mol = Chem.MolFromSmiles(smiles)
     if not mol: raise ValueError(f"Invalid SMILES: {smiles}")
