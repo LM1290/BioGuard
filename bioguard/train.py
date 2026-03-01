@@ -47,7 +47,6 @@ class BioFocalLoss(nn.Module):
         self.eps = 1e-8
 
     def forward(self, inputs, targets):
-        # Dr. Thornville Note: Still a band-aid, but we'll keep it so you don't explode your gradients.
         inputs = torch.clamp(inputs, min=-10.0, max=10.0)
 
         bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
@@ -226,7 +225,6 @@ def run_training(args):
         enzyme_dim=enzyme_dim
     ).to(device)
 
-    # RE-ADDED: The Pre-trained weights you almost threw away.
     pretrain_path = os.path.join(ARTIFACT_DIR, 'gat_encoder_weights.pt')
     if os.path.exists(pretrain_path):
         print(f"Loading pretrained encoder from {pretrain_path}...")
@@ -270,7 +268,7 @@ def run_training(args):
     for param in model.parameters(): param.requires_grad = True
 
     # Drop LR for fine-tuning the fusion (10x smaller)
-    optimizer_phase2 = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+    optimizer_phase2 = optim.AdamW(model.parameters(), lr=args.lr * 0.5, weight_decay=1e-4)
 
     start_epoch = args.warmup_epochs + 1
     for epoch in range(start_epoch, args.epochs + 1):
