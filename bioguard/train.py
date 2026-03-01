@@ -279,7 +279,7 @@ def run_training(args):
         print("No pretrained weights found. Training from scratch.")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    criterion = BioFocalLoss(alpha=0.95, gamma=2.0)
+    criterion = BioFocalLoss(alpha=0.70, gamma=2.0)
 
     print("\nStarting training loop (Optimizing for AUPRC)...")
     best_val_auprc = -1.0

@@ -114,7 +114,6 @@ def main():
             except Exception as e:
                 pass
 
-    # The Ruthless Filter
     successful_targets = []
     ruthless_trained_models = {}
 
