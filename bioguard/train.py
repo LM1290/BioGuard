@@ -116,7 +116,6 @@ class BioGuardDataset(Dataset):
             if raw_a is None or raw_b is None:
                 raise KeyError(f"Missing SMILES in LMDB: {smi_a if raw_a is None else smi_b}")
 
-            # Original PyG Data Objects (weights_only=False retained)
             data_a = torch.load(io.BytesIO(raw_a), weights_only=False)
             data_b = torch.load(io.BytesIO(raw_b), weights_only=False)
 
@@ -147,8 +146,7 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch_num, run_prof
         batch_y = batch_data[2].to(device)
 
         optimizer.zero_grad()
-
-        # Enforce two-phase routing, unpack tuple
+        # Enforce two-phase routing
         logits, _ = model(batch_a, batch_b, force_graph_only=force_graph_only)
 
         loss = criterion(logits, batch_y)
@@ -175,7 +173,7 @@ def validate(model, loader, criterion, device, epoch_num):
     y_true, y_probs = [], []
     alpha_telemetry = []
 
-    for batch_data in tqdm(loader, desc=f"Epoch {epoch_num}[Val  ]"):
+    for batch_data in tqdm(loader, desc=f"Epoch {epoch_num} [Val  ]"):
         batch_a = batch_data[0].to(device)
         batch_b = batch_data[1].to(device)
         batch_y = batch_data[2].to(device)
@@ -189,11 +187,12 @@ def validate(model, loader, criterion, device, epoch_num):
         y_true.extend(batch_y.cpu().numpy().flatten())
         y_probs.extend(probs.cpu().numpy().flatten())
 
+        # Track gate telemetry to ensure it isn't dying
         alpha_telemetry.extend(alpha.cpu().numpy().flatten())
 
     y_true = np.array(y_true)
     y_probs = np.array(y_probs)
-    mean_alpha = float(np.mean(alpha_telemetry)) if len(alpha_telemetry) > 0 else 0.5
+    mean_alpha = float(np.mean(alpha_telemetry)) if len(alpha_telemetry) > 0 else 0.0
 
     auprc = average_precision_score(y_true, y_probs)
     roc_auc = roc_auc_score(y_true, y_probs)
@@ -247,9 +246,9 @@ def run_training(args):
     # ==========================================
     if args.warmup_epochs > 0:
         print(f"\n--- PHASE 1: GAT Physics Warmup ({args.warmup_epochs} Epochs) ---")
-
-        # Freeze Prior Head (We don't freeze alpha_gate because it doesn't exist!)
+        # Freeze Prior Head and Gate
         for param in model.prior_head.parameters(): param.requires_grad = False
+        for param in model.alpha_gate.parameters(): param.requires_grad = False
 
         optimizer_phase1 = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
 
@@ -264,13 +263,12 @@ def run_training(args):
     # ==========================================
     # PHASE 2: ADAPTIVE ENSEMBLE CALIBRATION
     # ==========================================
-    print(f"\n--- PHASE 2: Additive Residual Fusion ---")
-
+    print(f"\n--- PHASE 2: Adaptive Ensemble Calibration ---")
     # Unfreeze everything
     for param in model.parameters(): param.requires_grad = True
 
     # Drop LR for fine-tuning the fusion (10x smaller)
-    optimizer_phase2 = optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=1e-4)
+    optimizer_phase2 = optim.AdamW(model.parameters(), lr=args.lr * 0.5, weight_decay=1e-4)
 
     start_epoch = args.warmup_epochs + 1
     for epoch in range(start_epoch, args.epochs + 1):
