@@ -1,35 +1,41 @@
-# 1. Base Image (Architecture Neutral)
-FROM python:3.11-slim
+FROM python:3.10-slim AS builder
 
-WORKDIR /app
-
-# 2. System Dependencies
-# We still need these for RDKit (libxrender) and PyTDC (build-essential/git)
-RUN apt-get update && apt-get install -y \
-    libxrender1 \
-    libxext6 \
+# Install core build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. SIMPLIFIED INSTALL STRATEGY (User Defined)
-# Install pure CPU PyTorch
-RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Create isolated virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Install PyG Core ONLY (Uses native PyTorch fallbacks instead of compiled extensions)
-RUN pip install torch-geometric
-COPY requirements_training.txt .
-RUN pip install --no-cache-dir -r requirements_training.txt
+# Install heavy Bio-ML dependencies
+# (Includes torch, torch-geometric, rdkit, fastapi, celery, redis)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copy Code
-COPY . .
 
-# 6. Runtime
-EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+FROM nvidia/cuda:12.1.0-base-ubuntu22.04
 
-# 7. Hybrid Entrypoint
+# Install bare-minimum Python runtime and RDKit geometry rendering libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    libxrender1 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["python", "-m", "bioguard.main"]
-CMD ["serve"]
+# Alias python3 to python
+RUN ln -s /usr/bin/python3.10 /usr/bin/python
+
+# Copy the pre-compiled environment from the builder stage
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Set up BioGuard working directory
+WORKDIR /app
+COPY . /app/
+
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
+# Default command (overridden by docker-compose for workers)
+CMD ["uvicorn", "bioguard.api:app", "--host", "0.0.0.0", "--port", "8000"]

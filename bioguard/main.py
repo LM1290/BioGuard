@@ -82,7 +82,7 @@ def main():
     p_train.add_argument("--lr", type=float, default=1e-4)
     p_train.add_argument("--patience", type=int, default=8, help="Early stopping patience")
 
-    # Model Architecture Params (MISSING IN YOUR VERSION)
+    # Model Architecture Params
     p_train.add_argument("--embedding_dim", type=int, default=128, help="Latent dimension for atoms")
     p_train.add_argument("--heads", type=int, default=4, help="Number of GAT attention heads")
 

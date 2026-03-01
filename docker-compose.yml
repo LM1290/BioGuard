@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # --- THE CACHE & MESSAGE BROKER ---
+  redis:
+    image: redis:7-alpine
+    container_name: bioguard_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # --- THE FASTAPI GATEWAY (GPU Inference) ---
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bioguard_api
+    command: uvicorn bioguard.api:app --host 0.0.0.0 --port 8000 --workers 4
+    ports:
+      - "8000:8000"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - NVIDIA_VISIBLE_DEVICES=all
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # --- THE HEAVY COMPUTE WORKER (CPU Conformer Generation) ---
+  worker:
+    build:
+      context: .
+      dockerfile: dockerfile.cpu  # <-- Your optimized CPU image
+    container_name: bioguard_worker
+    # Concurrency=4 maximizes throughput on a standard 4-core CPU instance
+    command: celery -A bioguard.worker.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
