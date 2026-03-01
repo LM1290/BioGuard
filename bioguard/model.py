@@ -34,7 +34,6 @@ class BioGuardGAT(nn.Module):
         )
 
         # --- 2. The Pure Prior Pathway ---
-        # The Metabolic-Only Prediction Head
         self.prior_head = nn.Sequential(
             nn.Linear(enzyme_dim * 3, 64),
             nn.ReLU(),
@@ -42,13 +41,14 @@ class BioGuardGAT(nn.Module):
         )
 
         # --- 3. The Adaptive Alpha Gate ---
-        # Decides how much to trust the Graph vs the Prior
         self.alpha_gate = nn.Sequential(
             nn.Linear((self.graph_out_dim * 3) + (enzyme_dim * 3), 32),
             nn.ReLU(),
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
+        with torch.no_grad():
+            self.alpha_gate[2].bias.fill_(-2.0)
 
         print(f"[BioGuardGAT] Adaptive Ensemble Gate Enabled. Enzyme Dim: {enzyme_dim}")
 
@@ -57,7 +57,6 @@ class BioGuardGAT(nn.Module):
         return next(self.parameters()).device
 
     def forward_one_arm(self, x, edge_index, edge_attr, batch):
-        """Processes the 3D Graph structure without injecting the prior."""
         x = self.atom_encoder(x.float())
         x = F.elu(self.conv1(x, edge_index, edge_attr=edge_attr.float()))
         x = F.elu(self.conv2(x, edge_index, edge_attr=edge_attr.float()))
@@ -67,12 +66,11 @@ class BioGuardGAT(nn.Module):
 
         return torch.cat([x_mean, x_max], dim=1)
 
-    def forward(self, data_a, data_b):
+    def forward(self, data_a, data_b, force_graph_only=False):
         # 1. Graph Embeddings
         vec_a = self.forward_one_arm(data_a.x, data_a.edge_index, data_a.edge_attr, data_a.batch)
         vec_b = self.forward_one_arm(data_b.x, data_b.edge_index, data_b.edge_attr, data_b.batch)
 
-        # Symmetric Graph Combination
         diff_g = torch.abs(vec_a - vec_b)
         gat_combined = torch.cat([vec_a + vec_b, diff_g, vec_a * vec_b], dim=1)
 
@@ -80,7 +78,6 @@ class BioGuardGAT(nn.Module):
         enz_a = data_a.enzyme_a.float()
         enz_b = data_b.enzyme_b.float()
 
-        # Symmetric Metabolic Combination
         diff_e = torch.abs(enz_a - enz_b)
         enz_combined = torch.cat([enz_a + enz_b, diff_e, enz_a * enz_b], dim=1)
 
@@ -89,10 +86,15 @@ class BioGuardGAT(nn.Module):
         prior_logits = self.prior_head(enz_combined)
 
         # 4. The Ensemble Gate
-        gate_input = torch.cat([gat_combined, enz_combined], dim=1)
-        alpha = self.alpha_gate(gate_input)
+        if force_graph_only:
+            alpha = torch.ones_like(gat_logits)
+            # Detach prior logits so no gradients flow back to the LightGBM pathway during warmup
+            prior_logits = prior_logits.detach()
+        else:
+            gate_input = torch.cat([gat_combined, enz_combined], dim=1)
+            alpha = self.alpha_gate(gate_input)
 
-        # Final Logit = (Graph * Alpha) + (Prior * (1 - Alpha))
         final_logits = (alpha * gat_logits) + ((1 - alpha) * prior_logits)
 
-        return final_logits
+        # Return alpha for telemetry during validation
+        return final_logits, alpha

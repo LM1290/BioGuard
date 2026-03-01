@@ -89,6 +89,7 @@ def main():
     # Data Params
     p_train.add_argument("--split", type=str, default='cold_drug', choices=['random', 'cold_drug', 'scaffold'])
     p_train.add_argument("--quick", action='store_true', help="Sanity check run")
+    p_train.add_argument("--warmup_epochs", type=int, default=5, help="Epochs to train GAT exclusively")
     p_train.set_defaults(func=run_train)
 
     # 3. EVAL

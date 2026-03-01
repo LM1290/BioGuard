@@ -13,9 +13,9 @@ TRAIN_NEG_RATIO = 1.0
 TEST_NEG_RATIO = 9.0
 
 # --- MODEL DIMENSIONS (Must match Featurizer) ---
-# Node Dim: Atom(24) + Degree(6) + Hybrid(5) + Aromatic(1) + Charge(1) + Chiral(4) = 41
+# Node Dim: Atom(24) + Degree(6) + Hybrid(5) + Aromatic(1) + Charge(1) + Chiral(4) + Spatial(5) = 46
 NODE_DIM = 46
-# Edge Dim: BondType(4) + Conjugated(1) + InRing(1) = 6
+# Edge Dim: BondType(4) + Conjugated(1) + InRing(1) + Edges Nodes (2) = 8
 EDGE_DIM = 8
 
 # --- TRAINING HYPERPARAMETERS ---

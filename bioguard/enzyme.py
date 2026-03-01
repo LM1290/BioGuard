@@ -74,10 +74,10 @@ class EnzymeManager:
         return self.feature_map.get(key, np.zeros(self.vector_dim, dtype=np.float32))
 
     def get_by_smiles(self, smiles):
-        """Robust lookup: Hits ChEMBL first, falls back to Random Forest Predictor."""
+        """Robust lookup: Hits CSV ground truth first, falls back to Predictor."""
         if not smiles: return np.zeros(self.vector_dim, dtype=np.float32)
 
-        # 1. Try Direct Hit (Ground Truth)
+        # 1. Try Direct Hit
         if smiles in self.smiles_map:
             return self.smiles_map[smiles]
 
@@ -86,6 +86,6 @@ class EnzymeManager:
         if can_smi and can_smi in self.smiles_map:
             return self.smiles_map[can_smi]
 
-        # 3. Fallback to Prediction (The Fix)
-        # logger.debug(f"Cache miss for {smiles[:10]}... Predicting metabolic profile.")
-        return self.predictor.predict(smiles)
+        # 3. Fallback to Prediction
+        # Pass the 60-dim feature list so the predictor slots the 15 targets correctly!
+        return self.predictor.predict(smiles, target_feature_list=self.feature_names)

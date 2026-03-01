@@ -1,6 +1,6 @@
 """
 BioGuard DDI Prediction API
-UPDATED: v2.3 (Robust Dimension Handling)
+UPDATED: v3.1 (Strict Dimension Verification & Alpha Telemetry)
 """
 
 import torch
@@ -35,9 +35,11 @@ logger = logging.getLogger("bioguard")
 # Global worker state
 worker_featurizer: Optional[GraphFeaturizer] = None
 
+
 def worker_init():
     global worker_featurizer
     worker_featurizer = GraphFeaturizer()
+
 
 def _graph_to_dict(data):
     return {
@@ -45,6 +47,7 @@ def _graph_to_dict(data):
         "edge_index": data.edge_index.tolist(),
         "edge_attr": data.edge_attr.tolist()
     }
+
 
 def standardize_smiles(smiles):
     """Helper to canonicalize SMILES in the worker process."""
@@ -57,20 +60,17 @@ def standardize_smiles(smiles):
         return None
     return None
 
+
 def run_cpu_processing(smiles_a, smiles_b):
-    """
-    Worker function: Featurization + Standardization
-    """
+    """Worker function: Featurization + Standardization"""
     global worker_featurizer
     if not worker_featurizer:
         return {"success": False, "error": "Worker not initialized"}
 
     try:
-        # 1. Featurize (Heavy RDKit work)
         g_a = worker_featurizer.smiles_to_graph(smiles_a)
         g_b = worker_featurizer.smiles_to_graph(smiles_b)
 
-        # 2. Standardize Strings (For Enzyme Lookup in main process)
         can_a = standardize_smiles(smiles_a)
         can_b = standardize_smiles(smiles_b)
 
@@ -87,46 +87,39 @@ def run_cpu_processing(smiles_a, smiles_b):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing BioGuard API v2.3 (Robust)...")
+    logger.info("Initializing BioGuard API v3.1 (Strict Mode)...")
 
     # 1. Setup Workers
     app.state.executor = ProcessPoolExecutor(max_workers=2, initializer=worker_init)
 
-    # 2. Load Enzyme Manager
+    # 2. Load Enzyme Manager (Strict Mode: No degrading allowed)
     manager = EnzymeManager(allow_degraded=False)
     app.state.enzyme_manager = manager
 
-    # 3. Load Config & Resolve Dimensions
-    node_dim = 41
-    # Start with the CSV's declared dimension
+    # 3. Load Config & Verify Dimensions
+    node_dim = 46  # Defaulting to 46 based on updated featurizer
     enzyme_dim = manager.vector_dim
+    embedding_dim = 128
+    heads = 4
     threshold = 0.5
 
     if os.path.exists(META_PATH):
         try:
             with open(META_PATH, 'r') as f:
                 meta = json.load(f)
-                node_dim = meta.get('node_dim', 41)
+                node_dim = meta.get('node_dim', node_dim)
+                embedding_dim = meta.get('embedding_dim', embedding_dim)
+                heads = meta.get('heads', heads)
 
-                # Check what the Model expects
                 model_enz_dim = meta.get('enzyme_dim', 0)
 
+                # STRICT FAILURE: Do not patch or fake dimensions.
                 if model_enz_dim > 0 and model_enz_dim != enzyme_dim:
-                    logger.warning(
-                        f"CRITICAL: Model expects {model_enz_dim} dims, but EnzymeCSV has {enzyme_dim}. "
-                        "Enabling compatibility mode."
+                    logger.error(
+                        f"CRITICAL MISMATCH: Model expects {model_enz_dim} enzyme features, "
+                        f"but EnzymeManager provides {enzyme_dim}. Predictions will 422."
                     )
-                    # Force the pipeline to use the Model's dimension
                     enzyme_dim = model_enz_dim
-
-                    # PATCH: Force the predictor to return vectors of the correct size
-                    # This prevents the 30 vs 60 mismatch crash when lookup fails
-                    if hasattr(manager, 'predictor'):
-                        # If the predictor has no feature names (untrained/missing),
-                        # give it dummy names so it returns the right sized zero-vector.
-                        if not manager.predictor.feature_names or len(manager.predictor.feature_names) != enzyme_dim:
-                            logger.info(f"Patching Predictor to output {enzyme_dim} dimensions.")
-                            manager.predictor.feature_names = [f"dim_{i}" for i in range(enzyme_dim)]
 
                 threshold = meta.get('threshold', 0.5)
         except Exception as e:
@@ -141,8 +134,8 @@ async def lifespan(app: FastAPI):
 
     model = BioGuardGAT(
         node_dim=node_dim,
-        embedding_dim=128,
-        heads=4,
+        embedding_dim=embedding_dim,
+        heads=heads,
         enzyme_dim=enzyme_dim
     ).to(device)
 
@@ -152,6 +145,7 @@ async def lifespan(app: FastAPI):
             model.eval()
             app.state.model = model
             app.state.model_ready = True
+            logger.info("Model weights loaded successfully.")
         except Exception as e:
             logger.critical(f"Model load failed: {e}")
             app.state.model_ready = False
@@ -161,25 +155,27 @@ async def lifespan(app: FastAPI):
 
     app.state.threshold = threshold
     app.state.calibrator = joblib.load(CALIBRATOR_PATH) if os.path.exists(CALIBRATOR_PATH) else None
-
-    # Store the FINAL agreed dimension for runtime checks
     app.state.final_enzyme_dim = enzyme_dim
 
     yield
     app.state.executor.shutdown()
 
 
-app = FastAPI(title="BioGuard API", version="2.3", lifespan=lifespan)
+app = FastAPI(title="BioGuard API", version="3.1", lifespan=lifespan)
+
 
 class PredictionRequest(BaseModel):
     drug_a_smiles: constr(min_length=1)
     drug_b_smiles: constr(min_length=1)
 
+
 class PredictionResponse(BaseModel):
     raw_score: float
     calibrated_probability: float
     risk_level: str
+    alpha_telemetry: float
     enzyme_status: str
+
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(req: PredictionRequest, request: Request):
@@ -187,7 +183,7 @@ async def predict(req: PredictionRequest, request: Request):
     if not st.model_ready:
         raise HTTPException(status_code=503, detail="Model not initialized")
 
-    # 1. Offload Heavy Lifting
+    # 1. Offload Heavy Lifting (Graph Creation)
     loop = asyncio.get_running_loop()
     res = await loop.run_in_executor(
         st.executor,
@@ -199,29 +195,23 @@ async def predict(req: PredictionRequest, request: Request):
     if not res['success']:
         raise HTTPException(status_code=400, detail=res['error'])
 
-    # 2. Look up Enzymes
+    # 2. Look up Enzymes (Metabolic Prior)
     vec_a = st.enzyme_manager.get_by_smiles(res['can_a'])
     vec_b = st.enzyme_manager.get_by_smiles(res['can_b'])
-
-    # --- DIMENSION GUARD ---
-    # Even with the patch, we ensure the vector matches the model's expectation exactly.
-    # This handles edge cases where the CSV has data (30 dims) but we need 60.
     required_dim = st.final_enzyme_dim
 
-    def enforce_dim(vec, target_dim):
-        if len(vec) == target_dim:
-            return vec
-        # If we have real data (non-zero) but wrong shape, we must pad carefully.
-        # Ideally, we should not see this if the CSV matched the Model.
-        new_vec = np.zeros(target_dim, dtype=np.float32)
-        # Copy what we have
-        min_len = min(len(vec), target_dim)
-        new_vec[:min_len] = vec[:min_len]
-        return new_vec
-
-    vec_a = enforce_dim(vec_a, required_dim)
-    vec_b = enforce_dim(vec_b, required_dim)
-    # -----------------------
+    # --- STRICT DIMENSION GUARD (Fails Loudly) ---
+    if len(vec_a) != required_dim:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Metabolic extraction failed for Drug A. Expected {required_dim} dimensions, got {len(vec_a)}."
+        )
+    if len(vec_b) != required_dim:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Metabolic extraction failed for Drug B. Expected {required_dim} dimensions, got {len(vec_b)}."
+        )
+    # ---------------------------------------------
 
     has_enzymes = np.any(vec_a) or np.any(vec_b)
 
@@ -238,17 +228,17 @@ async def predict(req: PredictionRequest, request: Request):
     data_a = dict_to_data(res['graph_a'], vec_a)
     data_b = dict_to_data(res['graph_b'], vec_b)
 
-    # Map enzyme_b correctly for Siamese network
     data_b.enzyme_b = data_b.enzyme_a
     del data_b.enzyme_a
 
     batch_a = Batch.from_data_list([data_a]).to(st.device)
     batch_b = Batch.from_data_list([data_b]).to(st.device)
 
-    # 4. Inference
+    # 4. Inference (Unpacking Tuple from Hybrid Architecture)
     with torch.no_grad():
-        logits = st.model(batch_a, batch_b)
+        logits, alpha = st.model(batch_a, batch_b)
         raw_prob = torch.sigmoid(logits).item()
+        alpha_val = alpha.item()
 
     # 5. Calibration
     calib_prob = raw_prob
@@ -260,5 +250,6 @@ async def predict(req: PredictionRequest, request: Request):
         "raw_score": raw_prob,
         "calibrated_probability": calib_prob,
         "risk_level": "High" if calib_prob >= st.threshold else "Low",
-        "enzyme_status": "Active" if has_enzymes else "Degraded (Missing Data)"
+        "alpha_telemetry": alpha_val,
+        "enzyme_status": "Active" if has_enzymes else "Silent (No Features Found)"
     }
