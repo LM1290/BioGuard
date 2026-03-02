@@ -48,7 +48,7 @@ class BioGuardGAT(nn.Module):
             nn.Sigmoid()
         )
         with torch.no_grad():
-            self.alpha_gate[2].bias.fill_(-2.0)
+            self.alpha_gate[2].bias.fill_(0.0)
 
         print(f"[BioGuardGAT] Adaptive Ensemble Gate Enabled. Enzyme Dim: {enzyme_dim}")
 

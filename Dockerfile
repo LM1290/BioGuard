@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04
 
-# Install bare-minimum Python runtime and RDKit geometry rendering libs
+# Install Python runtime and RDKit geometry rendering libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     libxrender1 \

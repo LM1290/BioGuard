@@ -10,7 +10,7 @@ LMDB_DIR = os.path.join(DATA_DIR, 'lmdb_cache')
 DATA_VERSION = "v18"
 RANDOM_SEED = 42
 TRAIN_NEG_RATIO = 1.0
-TEST_NEG_RATIO = 9.0
+TEST_NEG_RATIO = 2.3
 
 # --- MODEL DIMENSIONS (Must match Featurizer) ---
 # Node Dim: Atom(24) + Degree(6) + Hybrid(5) + Aromatic(1) + Charge(1) + Chiral(4) + Spatial(5) = 46
