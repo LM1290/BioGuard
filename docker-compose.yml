@@ -41,7 +41,7 @@ services:
   worker:
     build:
       context: .
-      dockerfile: dockerfile.cpu
+      dockerfile: Dockerfile.cpu
     container_name: bioguard_worker
     # Concurrency=4 maximizes throughput on a standard 4-core CPU instance
     command: celery -A bioguard.worker.celery_app worker --loglevel=info --concurrency=4
