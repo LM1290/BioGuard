@@ -17,8 +17,11 @@ Previous versions relied on static concatenation of biological features. BioGuar
 2.  **BioGuard GATv3:** Sacrifices precision for **High Recall (0.81)**, effectively functioning as a safety net that catches 81% of toxic interactions in strictly novel compounds.
 3.  **End-to-End NCE Support:** We replaced the static ChEMBL injection layer with an embedded **LightGBM Ensemble**, allowing immediate metabolic prediction for drugs not present in public databases.
 
-![](/Users/lalitmaheswaran/Downloads/specificity_recall_curves_holdout(1).png)
-Ability of LightGBM to predict metabolic liabilities for scaffold split NCEs.
+
+* Ability of LightGBM to predict metabolic liabilities for scaffold split NCEs.
+![](images/specificity_recall_curves_holdout(1).png)
+* API Prediction Example: Ibuprofen and Aspirin
+![](images/ExampleAspirinIbuprofen.png)
 ---
 
 ## 1. The "SOTA" Integrity Gap
