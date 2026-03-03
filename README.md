@@ -81,6 +81,9 @@ cd BioGuard
 
 # 2. Build Environment
 docker build -t bioguard_app .
+
+#3. Serve API Endpoint
+docker run -p 8000:8000 bioguard_app
 ```
 
 ### Data Pipeline & LMDB Generation
