@@ -11,8 +11,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Install heavy Bio-ML dependencies
 # (Includes torch, torch-geometric, rdkit, fastapi, celery, redis)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements_training.txt .
+RUN pip install --no-cache-dir -r requirements_training.txt
 
 
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04
