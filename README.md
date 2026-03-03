@@ -18,7 +18,7 @@ Previous versions relied on static concatenation of biological features. BioGuar
 3.  **End-to-End NCE Support:** We replaced the static ChEMBL injection layer with an embedded **LightGBM Ensemble**, allowing immediate metabolic prediction for drugs not present in public databases.
 
 
-* Ability of LightGBM to predict metabolic liabilities for scaffold split NCEs.
+**Proxy Task (CYP Family Prediction): Ability of LightGBM to predict metabolic liabilities for scaffold split NCEs.**
 ![](images/specificity_recall_curves_holdout(1).png)
 * API Prediction Example: Ibuprofen and Aspirin
 ![](images/ExampleAspirinIbuprofen.png)
