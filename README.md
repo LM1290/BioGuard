@@ -88,18 +88,22 @@ docker run -p 8000:8000 bioguard_app
 
 ### Data Pipeline & LMDB Generation
 To reproduce the 3D physics generation and LMDB caching:
+```bash
+#1. Generate Enzyme Dataset via ChEMBL
+python -m tools.map_human_cyps
+python -m tools.fetch_full_enzyme_profile
 
+#2. Patch SMILES to Dataset
+python -m tools.patch_smiles
+```
 ```bash
 # 1. Download and Clean TWOSIDES (Scaffold Split)
 python -c "from bioguard.data_loader import load_twosides_data; load_twosides_data(split_method='cold_drug')"
 
-# 2. Patch Smiles to the enzyme dataset so LightGBM can train
-python -m tools.patch_smiles
-
-# 3. Train the internal CYP Predictor (LightGBM Ensemble)
+# 2. Train the internal CYP Predictor (LightGBM Ensemble)
 python -m bioguard.train_cyp_predictor
 
-# 4. Build LMDB Cache (High CPU Usage - Multiprocessed 3D Embedding)
+# 3. Build LMDB Cache (High CPU Usage - Multiprocessed 3D Embedding)
 python -m bioguard.build_lmdb
 ```
 
