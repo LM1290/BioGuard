@@ -53,7 +53,7 @@ To resolve memory bottlenecks and ensure data integrity:
 ### C. Model B: BioGuard GATv3 (Adaptive)
 *   **Input:** Molecular Graph + Predicted CYP Vector.
 *   **Gate Mechanism:** $\text{Logits} = \sigma(\text{Gate}) \cdot f_{GAT} + (1 - \sigma(\text{Gate})) \cdot f_{Prior}$.
-*   **Loss Function:** **BioFocalLoss** ($\gamma=2.0, \alpha=0.70$) implemented to handle extreme class imbalance (3:10) and focus learning on hard negatives.
+*   **Loss Function:** **BioFocalLoss** ($\gamma=2.0, \alpha=0.70$) implemented to handle extreme class imbalance (3:7) and focus learning on hard negatives.
 
 ---
 
