@@ -1,6 +1,6 @@
 """
 BioGuard DDI Prediction API
-UPDATED: v3.1 (Strict Dimension Verification & Alpha Telemetry)
+UPDATED: v3.2 (Celery/Redis Integration & Alpha Telemetry)
 """
 
 import torch
@@ -10,18 +10,15 @@ import logging
 import json
 import joblib
 import numpy as np
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, constr
-from typing import Optional
-from rdkit import Chem
+from celery import Celery
 
 # PyG Imports
 from torch_geometric.data import Data, Batch
 
 from .model import BioGuardGAT
-from .featurizer import GraphFeaturizer
 from .enzyme import EnzymeManager
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -32,71 +29,26 @@ CALIBRATOR_PATH = os.path.join(ARTIFACT_DIR, 'calibrator.joblib')
 
 logger = logging.getLogger("bioguard")
 
-# Global worker state
-worker_featurizer: Optional[GraphFeaturizer] = None
+# --- CELERY CONFIGURATION ---
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 
-
-def worker_init():
-    global worker_featurizer
-    worker_featurizer = GraphFeaturizer()
-
-
-def _graph_to_dict(data):
-    return {
-        "x": data.x.tolist(),
-        "edge_index": data.edge_index.tolist(),
-        "edge_attr": data.edge_attr.tolist()
-    }
-
-
-def standardize_smiles(smiles):
-    """Helper to canonicalize SMILES in the worker process."""
-    if not smiles: return None
-    try:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol:
-            return Chem.MolToSmiles(mol, isomericSmiles=False)
-    except:
-        return None
-    return None
-
-
-def run_cpu_processing(smiles_a, smiles_b):
-    """Worker function: Featurization + Standardization"""
-    global worker_featurizer
-    if not worker_featurizer:
-        return {"success": False, "error": "Worker not initialized"}
-
-    try:
-        g_a = worker_featurizer.smiles_to_graph(smiles_a)
-        g_b = worker_featurizer.smiles_to_graph(smiles_b)
-
-        can_a = standardize_smiles(smiles_a)
-        can_b = standardize_smiles(smiles_b)
-
-        return {
-            "success": True,
-            "graph_a": _graph_to_dict(g_a),
-            "graph_b": _graph_to_dict(g_b),
-            "can_a": can_a,
-            "can_b": can_b
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+celery_app = Celery(
+    "bioguard_api",
+    broker=CELERY_BROKER_URL,
+    backend=CELERY_RESULT_BACKEND
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing BioGuard API v3.1 (Strict Mode)...")
+    logger.info("Initializing BioGuard API v3.2 (Celery Mode)...")
 
-    # 1. Setup Workers
-    app.state.executor = ProcessPoolExecutor(max_workers=2, initializer=worker_init)
-
-    # 2. Load Enzyme Manager (Strict Mode: No degrading allowed)
+    # 1. Load Enzyme Manager (Strict Mode: No degrading allowed)
     manager = EnzymeManager(allow_degraded=False)
     app.state.enzyme_manager = manager
 
-    # 3. Load Config & Verify Dimensions
+    # 2. Load Config & Verify Dimensions
     node_dim = 46  # Defaulting to 46 based on updated featurizer
     enzyme_dim = manager.vector_dim
     embedding_dim = 128
@@ -125,7 +77,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Metadata load failed: {e}")
 
-    # 4. Initialize Model
+    # 3. Initialize Model
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
     app.state.device = device
@@ -158,10 +110,10 @@ async def lifespan(app: FastAPI):
     app.state.final_enzyme_dim = enzyme_dim
 
     yield
-    app.state.executor.shutdown()
+    # No ProcessPoolExecutor to shut down anymore
 
 
-app = FastAPI(title="BioGuard API", version="3.1", lifespan=lifespan)
+app = FastAPI(title="BioGuard API", version="3.2", lifespan=lifespan)
 
 
 class PredictionRequest(BaseModel):
@@ -183,24 +135,28 @@ async def predict(req: PredictionRequest, request: Request):
     if not st.model_ready:
         raise HTTPException(status_code=503, detail="Model not initialized")
 
-    # 1. Offload Heavy Lifting (Graph Creation)
-    loop = asyncio.get_running_loop()
-    res = await loop.run_in_executor(
-        st.executor,
-        run_cpu_processing,
-        req.drug_a_smiles,
-        req.drug_b_smiles
-    )
+    # 1. Offload Heavy Lifting to Celery Worker
+    try:
+        # Submit the task to the queue mapped in docker-compose
+        task = celery_app.send_task(
+            "bioguard.worker.run_cpu_processing",
+            args=[req.drug_a_smiles, req.drug_b_smiles]
+        )
 
-    if not res['success']:
-        raise HTTPException(status_code=400, detail=res['error'])
+        # Await the result in a thread so we don't block the async event loop
+        res = await asyncio.to_thread(task.get, timeout=30.0)
+    except Exception as e:
+        raise HTTPException(status_code=504, detail=f"Celery worker timeout or error: {str(e)}")
+
+    if not res.get('success'):
+        raise HTTPException(status_code=400, detail=res.get('error', 'Unknown worker error'))
 
     # 2. Look up Enzymes (Metabolic Prior)
     vec_a = st.enzyme_manager.get_by_smiles(res['can_a'])
     vec_b = st.enzyme_manager.get_by_smiles(res['can_b'])
     required_dim = st.final_enzyme_dim
 
-    # --- STRICT DIMENSION GUARD (Fails Loudly) ---
+    # --- STRICT DIMENSION GUARD ---
     if len(vec_a) != required_dim:
         raise HTTPException(
             status_code=422,
@@ -211,7 +167,6 @@ async def predict(req: PredictionRequest, request: Request):
             status_code=422,
             detail=f"Metabolic extraction failed for Drug B. Expected {required_dim} dimensions, got {len(vec_b)}."
         )
-    # ---------------------------------------------
 
     has_enzymes = np.any(vec_a) or np.any(vec_b)
 
