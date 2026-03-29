@@ -70,32 +70,6 @@ st.markdown("""
 
 
 # ---------------------------------------------------------------------------
-# Timeout helper (Unix only -- Streamlit Cloud runs Linux)
-# ---------------------------------------------------------------------------
-class _Timeout:
-    """Context manager that raises TimeoutError after *seconds* on Unix."""
-    def __init__(self, seconds):
-        self.seconds = seconds
-
-    def _handler(self, signum, frame):
-        raise TimeoutError(
-            f"3D conformer generation exceeded {self.seconds}s. "
-            "Try a smaller molecule (< 80 heavy atoms)."
-        )
-
-    def __enter__(self):
-        if hasattr(signal, "SIGALRM"):
-            signal.signal(signal.SIGALRM, self._handler)
-            signal.alarm(self.seconds)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if hasattr(signal, "SIGALRM"):
-            signal.alarm(0)
-        return False
-
-
-# ---------------------------------------------------------------------------
 # Molecule validation
 # ---------------------------------------------------------------------------
 def validate_smiles(smiles):
@@ -192,8 +166,7 @@ def load_calibration_data():
 @st.cache_data(show_spinner=False)
 def featurize_molecule(_featurizer, smiles):
     """Cache 3D graph generation per SMILES so repeat predictions skip ETKDGv3."""
-    with _Timeout(CONFORMER_TIMEOUT_SEC):
-        return _featurizer.smiles_to_graph(smiles.strip())
+    return _featurizer.smiles_to_graph(smiles.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +434,7 @@ if page == "Predict DDI":
                                         "these compounds."
                                     )
 
-                    except TimeoutError as e:
-                        st.error(str(e))
+
                     except Exception as e:
                         st.error(f"Prediction failed: {e}")
                         with st.expander("Error details"):
