@@ -1,5 +1,7 @@
 # BioGuard V3: Adaptive Graph-Metabolic DDI Prediction
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://bioguardv3.streamlit.app/)
+
 **Status:** V3.0 (Strict Mode / LMDB-Backed)
 
 **License:** MIT
