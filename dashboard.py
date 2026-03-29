@@ -228,9 +228,9 @@ if page == "Predict DDI":
         st.subheader("Drug B")
         smiles_b = st.text_input(
             "SMILES",
-            value="CC12CCC3C(CCC4=CC(=O)CCC43C)C1CCC2O",
+            value="CC(C)CC1=CC=C(C=C1)C(C)C(=O)O",
             key="smiles_b",
-            help="Testosterone: CC12CCC3C(CCC4=CC(=O)CCC43C)C1CCC2O",
+            help="Ibuprofen: CC(C)CC1=CC=C(C=C1)C(C)C(=O)O",
         )
         if smiles_b and validate_smiles(smiles_b):
             img_b = smiles_to_image(smiles_b)
@@ -246,7 +246,6 @@ if page == "Predict DDI":
             )
         elif smiles_b:
             st.error("Invalid SMILES")
-
     st.divider()
 
     if st.button("Predict Interaction", type="primary", use_container_width=True):
