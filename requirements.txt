@@ -2,6 +2,7 @@ fastapi==0.119.1
 joblib==1.5.3
 numpy==1.26.4
 pandas==2.2.2
+plotly==5.18.0
 pyarrow==22.0.0
 pydantic==2.12.5
 PyTDC==1.0.0
