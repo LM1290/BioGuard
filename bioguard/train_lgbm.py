@@ -1,116 +1,123 @@
-import pandas as pd
-import numpy as np
-import lightgbm as lgb
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, recall_score, confusion_matrix
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from bioguard.data_loader import load_twosides_data
-# --- NEW IMPORT ---
-from bioguard.enzyme import EnzymeManager
-import os
-import joblib
+"""LightGBM ranking baseline for observed-positive versus unlabeled pairs."""
+
 import argparse
+import json
+from pathlib import Path
 
-# --- CONFIG ---
-ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'artifacts')
-os.makedirs(ARTIFACT_DIR, exist_ok=True)
+import joblib
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import rdFingerprintGenerator
+from sklearn.metrics import average_precision_score, roc_auc_score
 
-
-def get_fingerprint(smiles, radius=2, n_bits=1024):
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return np.zeros((n_bits,), dtype=np.float32)
-    return np.array(AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits))
+from bioguard.config import ARTIFACT_DIR, RANDOM_SEED
+from bioguard.data_loader import load_twosides_binary_pu
+from bioguard.enzyme import EnzymeManager
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--split', type=str, default='cold', choices=['random', 'cold', 'scaffold'])
+    parser.add_argument(
+        "--split",
+        default="scaffold_disjoint",
+        choices=["pair_random", "drug_disjoint", "scaffold_disjoint"],
+    )
+    parser.add_argument("--unlabeled-ratio", type=float, default=1.0)
     args = parser.parse_args()
 
-    print(f"--- Training LightGBM Baseline ({args.split.upper()} Split) ---")
-
-    # 1. Load Data
-    df = load_twosides_data(split_method=args.split)
-
-    # 2. Initialize Enzyme Manager
-    print("Loading Enzyme Features...")
-    enzyme_mgr = EnzymeManager(allow_degraded=True)
-    print(f"Enzyme Vector Dim: {enzyme_mgr.vector_dim}")
-
-    # 3. Vectorize
-    print("Generating Features (Fingerprints + Enzymes)...")
-
-    # Pre-compute unique fingerprints to save time
-    unique_smiles = pd.concat([df['smiles_a'], df['smiles_b']]).unique()
-    fp_map = {s: get_fingerprint(s) for s in unique_smiles}
-
-    def vectorize(row):
-        # 1. Chemical Features (Morgan FP)
-        fp_a = fp_map.get(row['smiles_a'])
-        fp_b = fp_map.get(row['smiles_b'])
-
-        # 2. Biological Features (Enzymes)
-        enz_a = enzyme_mgr.get_by_smiles(row['smiles_a'])
-        enz_b = enzyme_mgr.get_by_smiles(row['smiles_b'])
-
-        # Concatenate: [FP_A, Enz_A, FP_B, Enz_B]
-        return np.concatenate([fp_a, enz_a, fp_b, enz_b])
-
-    # 4. Prepare Splits
-    train_df = df[df['split'] == 'train']
-    val_df = df[df['split'] == 'val']
-    test_df = df[df['split'] == 'test']
-
-    print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
-
-    # Note: apply() is a bit slow, but fine for baselines
-    print("Building Training Matrix...")
-    X_train = np.stack(train_df.apply(vectorize, axis=1).values)
-    y_train = train_df['label'].values
-
-    print("Building Validation Matrix...")
-    X_val = np.stack(val_df.apply(vectorize, axis=1).values)
-    y_val = val_df['label'].values
-
-    print("Building Test Matrix...")
-    X_test = np.stack(test_df.apply(vectorize, axis=1).values)
-    y_test = test_df['label'].values
-
-    # 5. Train
-    print("Fitting LightGBM...")
-    clf = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
-
-    clf.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric='auc',
-        callbacks=[lgb.early_stopping(stopping_rounds=10)]
+    bundle = load_twosides_binary_pu(
+        split_method=args.split,
+        train_unlabeled_ratio=args.unlabeled_ratio,
+        val_unlabeled_ratio=args.unlabeled_ratio,
+        test_unlabeled_ratio=args.unlabeled_ratio,
+        random_seed=RANDOM_SEED,
+    )
+    frame = bundle.records
+    enzyme_manager = EnzymeManager(allow_degraded=False)
+    generator = rdFingerprintGenerator.GetMorganGenerator(
+        radius=2,
+        fpSize=1024,
+        includeChirality=True,
     )
 
-    # 6. Evaluate
-    y_pred = clf.predict_proba(X_test)[:, 1]
-    y_pred_bin = (y_pred >= 0.5).astype(int)
-    auc = roc_auc_score(y_test, y_pred)
-    pr = average_precision_score(y_test, y_pred)
-    acc = accuracy_score(y_test, (y_pred >= 0.5).astype(int))
-    rec = recall_score(y_test, y_pred >= 0.5)
-    tn, fp, fn, tp = confusion_matrix(y_test, y_pred_bin).ravel()
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    unique_smiles = pd.unique(
+        pd.concat([frame["smiles_a"], frame["smiles_b"]])
+    )
+    fingerprint_map = {}
+    for smiles in unique_smiles:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid standardized SMILES: {smiles}")
+        fingerprint_map[smiles] = np.asarray(
+            generator.GetFingerprintAsNumPy(mol),
+            dtype=np.float32,
+        )
 
-    print("\n" + "=" * 40)
-    print(f"LGBM + ENZYMES RESULTS ({args.split.upper()})")
-    print("=" * 40)
-    print(f"ROC-AUC:     {auc:.4f}")
-    print(f"PR-AUC:      {pr:.4f}")
-    print(f"Accuracy:    {acc:.4f}")
-    print(f"Recall:      {rec:.4f}")
-    print(f"Specificity: {specificity:.4f}")  # <-- Added output
-    print("=" * 40)
-    # Save
-    model_name = f'lgbm_baseline_{args.split}.pkl'
-    joblib.dump(clf, os.path.join(ARTIFACT_DIR, model_name))
-    print(f"Model saved to {model_name}")
+    def vectorize(row):
+        fp_a = fingerprint_map[row.smiles_a]
+        fp_b = fingerprint_map[row.smiles_b]
+        enzyme_a = enzyme_manager.get_by_smiles(row.smiles_a)
+        enzyme_b = enzyme_manager.get_by_smiles(row.smiles_b)
+        return np.concatenate(
+            [
+                fp_a + fp_b,
+                np.abs(fp_a - fp_b),
+                fp_a * fp_b,
+                enzyme_a + enzyme_b,
+                np.abs(enzyme_a - enzyme_b),
+                enzyme_a * enzyme_b,
+            ]
+        )
+
+    matrices = {}
+    targets = {}
+    for split in ("train", "val", "test"):
+        subset = frame[frame["split"] == split]
+        matrices[split] = np.stack(
+            [vectorize(row) for row in subset.itertuples(index=False)]
+        )
+        targets[split] = subset["target"].to_numpy()
+
+    classifier = lgb.LGBMClassifier(
+        n_estimators=500,
+        learning_rate=0.05,
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
+    )
+    classifier.fit(
+        matrices["train"],
+        targets["train"],
+        eval_set=[(matrices["val"], targets["val"])],
+        eval_metric="average_precision",
+        callbacks=[lgb.early_stopping(stopping_rounds=30)],
+    )
+    scores = classifier.predict_proba(matrices["test"])[:, 1]
+
+    artifact_dir = Path(ARTIFACT_DIR)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    model_path = artifact_dir / f"lgbm_pu_{args.split}.joblib"
+    result_path = artifact_dir / f"lgbm_pu_{args.split}.json"
+    joblib.dump(classifier, model_path)
+    results = {
+        "schema_version": 2,
+        "task": "binary_any_reported_event_positive_unlabeled",
+        "model": "LightGBM symmetric ECFP and legacy enzyme features",
+        "split": args.split,
+        "data_records_sha256": bundle.manifest["records_sha256"],
+        "pu_roc_auc": float(roc_auc_score(targets["test"], scores)),
+        "pu_pr_auc": float(average_precision_score(targets["test"], scores)),
+        "warning": (
+            "This supervised baseline distinguishes observed positives from "
+            "sampled unlabeled pairs; it does not learn from confirmed negatives."
+        ),
+    }
+    result_path.write_text(
+        json.dumps(results, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(results, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

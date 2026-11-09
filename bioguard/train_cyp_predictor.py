@@ -26,13 +26,15 @@ os.makedirs(ARTIFACT_DIR, exist_ok=True)
 # 1. PURE TOPOLOGY:
 def get_fp_only(smiles, radius=2, n_bits=2048):
     mol = Chem.MolFromSmiles(smiles)
-    if not mol: raise ValueError(f"Invalid SMILES: {smiles}")
+    if not mol:
+        raise ValueError(f"Invalid SMILES: {smiles}")
     return np.array(AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits), dtype=np.float32)
 
 
 def generate_scaffold(smiles):
     mol = Chem.MolFromSmiles(smiles)
-    if not mol: raise ValueError(f"Invalid SMILES: {smiles}")
+    if not mol:
+        raise ValueError(f"Invalid SMILES: {smiles}")
     return MurckoScaffold.MurckoScaffoldSmiles(mol=mol, includeChirality=False)
 
 
@@ -111,7 +113,7 @@ def main():
                 if auc is not None:
                     trained_models[res_target] = clf
                     print(f"  -> [DONE] {res_target:<15} | ROC: {auc:.4f} | PR: {pr:.4f}")
-            except Exception as e:
+            except Exception:
                 pass
 
     successful_targets = []

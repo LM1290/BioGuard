@@ -4,10 +4,10 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
-LMDB_DIR = os.path.join(DATA_DIR, 'lmdb_cache')
+LMDB_DIR = os.getenv("BG_GRAPH_CACHE", os.path.join(DATA_DIR, "lmdb_cache_v1"))
 
 # --- DATA HYPERPARAMETERS ---
-DATA_VERSION = "v18"
+DATA_VERSION = "twosides-relations-v1"
 RANDOM_SEED = 42
 TRAIN_NEG_RATIO = 1.0
 TEST_NEG_RATIO = 2.3

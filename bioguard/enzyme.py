@@ -25,12 +25,13 @@ class EnzymeManager:
 
     # ... [Keep _canonicalize method unchanged] ...
     def _canonicalize(self, smiles):
-        if pd.isna(smiles) or not smiles: return None
+        if pd.isna(smiles) or not smiles:
+            return None
         try:
             mol = Chem.MolFromSmiles(smiles)
             if mol:
                 return Chem.MolToSmiles(mol, isomericSmiles=False)
-        except:
+        except (RuntimeError, TypeError, ValueError):
             return None
         return None
 
@@ -69,13 +70,15 @@ class EnzymeManager:
 
     def get_vector(self, drug_name):
         """Legacy lookup by Name/ID"""
-        if not drug_name: return np.zeros(self.vector_dim, dtype=np.float32)
+        if not drug_name:
+            return np.zeros(self.vector_dim, dtype=np.float32)
         key = str(drug_name).lower().strip()
         return self.feature_map.get(key, np.zeros(self.vector_dim, dtype=np.float32))
 
     def get_by_smiles(self, smiles):
         """Robust lookup: Hits CSV ground truth first, falls back to Predictor."""
-        if not smiles: return np.zeros(self.vector_dim, dtype=np.float32)
+        if not smiles:
+            return np.zeros(self.vector_dim, dtype=np.float32)
 
         # 1. Try Direct Hit
         if smiles in self.smiles_map:
@@ -89,3 +92,12 @@ class EnzymeManager:
         # 3. Fallback to Prediction
         # Pass the 60-dim feature list so the predictor slots the 15 targets correctly!
         return self.predictor.predict(smiles, target_feature_list=self.feature_names)
+
+    def coverage_status(self, smiles):
+        """Lookup provenance, not a claim that all biological endpoints are known."""
+        canonical = self._canonicalize(smiles)
+        if canonical in self.smiles_map:
+            return "legacy_table"
+        if self.predictor.models:
+            return "predicted_partial"
+        return "unavailable_zero_vector"

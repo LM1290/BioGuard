@@ -1,44 +1,48 @@
-"""
-BioGuard Celery Worker Application
-Handles CPU-intensive RDKit conformer generation and PyG graph featurization.
-"""
+"""CPU worker for bounded RDKit graph featurization."""
 
-import os
 import logging
+import os
+
 from celery import Celery
 from celery.signals import worker_process_init
-from rdkit import Chem
 
-# Import the GraphFeaturizer from your local package
 from bioguard.featurizer import GraphFeaturizer
+from bioguard.molecular import LEGACY_POLICY, prepare_molecule
+from bioguard.graph_cache import graph_contract
 
 logger = logging.getLogger("bioguard.worker")
 
-# --- CELERY CONFIGURATION ---
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+MAX_SMILES_LENGTH = int(os.getenv("BG_MAX_SMILES_LENGTH", "4096"))
+MAX_HEAVY_ATOMS = int(os.getenv("BG_MAX_HEAVY_ATOMS", "256"))
+TASK_SOFT_TIME_LIMIT = int(os.getenv("BG_TASK_SOFT_TIME_LIMIT", "45"))
+TASK_TIME_LIMIT = int(os.getenv("BG_TASK_TIME_LIMIT", "60"))
 
 celery_app = Celery(
     "bioguard_worker",
     broker=CELERY_BROKER_URL,
-    backend=CELERY_RESULT_BACKEND
+    backend=CELERY_RESULT_BACKEND,
 )
 
-# Optional: Configure Celery serialization to handle standard JSON safely
 celery_app.conf.update(
-    task_serializer='json',
-    accept_content=['json'],
-    result_serializer='json',
-    timezone='UTC',
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="UTC",
     enable_utc=True,
+    task_soft_time_limit=TASK_SOFT_TIME_LIMIT,
+    task_time_limit=TASK_TIME_LIMIT,
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,
+    result_expires=300,
 )
 
-# Global worker state
 worker_featurizer = None
 
 
 @worker_process_init.connect
-def init_worker(**kwargs):
+def init_worker(**_kwargs):
     """
     Runs once per worker process on startup.
     This ensures we only initialize the GraphFeaturizer (and any heavy
@@ -54,26 +58,19 @@ def _graph_to_dict(data):
     return {
         "x": data.x.tolist(),
         "edge_index": data.edge_index.tolist(),
-        "edge_attr": data.edge_attr.tolist()
+        "edge_attr": data.edge_attr.tolist(),
     }
 
 
-def standardize_smiles(smiles):
-    """Helper to canonicalize SMILES strings safely."""
-    if not smiles:
-        return None
+def _validate_smiles(value, label, policy=LEGACY_POLICY):
     try:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol:
-            return Chem.MolToSmiles(mol, isomericSmiles=False)
-    except Exception as e:
-        logger.warning(f"Failed to standardize SMILES {smiles}: {e}")
-        return None
-    return None
+        return prepare_molecule(value, policy, MAX_SMILES_LENGTH, MAX_HEAVY_ATOMS)
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
 
 
 @celery_app.task(name="bioguard.worker.run_cpu_processing")
-def run_cpu_processing(smiles_a, smiles_b):
+def run_cpu_processing(smiles_a, smiles_b, policy=LEGACY_POLICY):
     """
     The main Celery task triggered by the FastAPI gateway.
     It takes two SMILES strings, builds their graphs, canonicalizes them,
@@ -81,26 +78,32 @@ def run_cpu_processing(smiles_a, smiles_b):
     """
     global worker_featurizer
 
-    if not worker_featurizer:
+    if worker_featurizer is None:
         return {"success": False, "error": "Worker featurizer not initialized."}
 
     try:
-        # 1. Generate 3D Conformers and Extract Features
-        g_a = worker_featurizer.smiles_to_graph(smiles_a)
-        g_b = worker_featurizer.smiles_to_graph(smiles_b)
+        graph_input_a, can_a = _validate_smiles(smiles_a, "drug_a_smiles", policy)
+        graph_input_b, can_b = _validate_smiles(smiles_b, "drug_b_smiles", policy)
+        g_a = worker_featurizer.smiles_to_graph(graph_input_a, policy=policy)
+        g_b = worker_featurizer.smiles_to_graph(graph_input_b, policy=policy)
 
-        # 2. Canonicalize SMILES for Enzyme Manager lookups
-        can_a = standardize_smiles(smiles_a)
-        can_b = standardize_smiles(smiles_b)
-
-        # 3. Serialize and Return Result to Redis backend
         return {
             "success": True,
+            "standardization_policy": policy,
+            "graph_contract": graph_contract(),
+            "normalized_a": graph_input_a,
+            "normalized_b": graph_input_b,
             "graph_a": _graph_to_dict(g_a),
             "graph_b": _graph_to_dict(g_b),
             "can_a": can_a,
-            "can_b": can_b
+            "can_b": can_b,
         }
-    except Exception as e:
-        logger.error(f"Error processing SMILES pair ({smiles_a}, {smiles_b}): {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+    except ValueError as exc:
+        logger.info("Rejected invalid prediction input: %s", exc)
+        return {"success": False, "error": str(exc)}
+    except Exception:
+        logger.exception("Unexpected graph-featurization failure")
+        return {
+            "success": False,
+            "error": "Molecular graph generation failed",
+        }

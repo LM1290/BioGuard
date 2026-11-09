@@ -1,203 +1,116 @@
-"""
-Compare all models: baselines vs neural network.
-UPDATED: v3.0 (The "Board-Ready" Edition)
-- Restored & Optimized Visualizations (Radar, Bar, Gain Charts)
-- Robust Metadata handling for Series B splits (Cold/Scaffold)
-- Automatic "Verdict" generation based on performance deltas
-"""
+"""Compare PU ranking results only when their provenance contracts match."""
 
 import json
-import os
+from pathlib import Path
+
 import numpy as np
-import matplotlib
-matplotlib.use('Agg') # Force headless mode for server compatibility
-import matplotlib.pyplot as plt
-import seaborn as sns
-from math import pi
 
-# Configurations
-sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 8)
-plt.rcParams['font.size'] = 10
-ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'artifacts')
-BASELINE_PATH = os.path.join(ARTIFACT_DIR, 'baseline_results.json')
-EVAL_PATH = os.path.join(ARTIFACT_DIR, 'eval_results.json')
-META_PATH = os.path.join(ARTIFACT_DIR, 'metadata.json')
+from .artifacts import ArtifactContractError, read_metadata
+from .config import ARTIFACT_DIR
+from .cohorts import require_matching_cohorts
 
-def load_data():
-    """Load all result files with robust error handling."""
-    data = {'baselines': {}, 'gnn': {}, 'meta': {}}
+ARTIFACT_PATH = Path(ARTIFACT_DIR)
+EVAL_PATH = ARTIFACT_PATH / "eval_results.json"
+BASELINE_PATH = ARTIFACT_PATH / "baseline_results.json"
+OUTPUT_PATH = ARTIFACT_PATH / "pu_comparison.png"
 
-    # 1. Load Metadata
-    if os.path.exists(META_PATH):
-        with open(META_PATH, 'r') as f:
-            data['meta'] = json.load(f)
 
-    # 2. Load Baselines
-    if os.path.exists(BASELINE_PATH):
-        with open(BASELINE_PATH, 'r') as f:
-            data['baselines'] = json.load(f)
+def _read_json(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ArtifactContractError(f"Could not read {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ArtifactContractError(f"{path} must contain a JSON object")
+    return value
 
-    # 3. Load GNN Evaluation
-    if os.path.exists(EVAL_PATH):
-        with open(EVAL_PATH, 'r') as f:
-            data['gnn'] = json.load(f)
-            # Normalize keys to match baselines if needed
-            if 'name' not in data['gnn']: data['gnn']['name'] = 'BioGuardGAT (GNN)'
 
-    return data
+def load_comparable_results():
+    metadata = read_metadata(ARTIFACT_PATH)
+    evaluation = _read_json(EVAL_PATH)
+    baselines = _read_json(BASELINE_PATH)
 
-def get_best_baseline(baselines):
-    """Find the best performing baseline (by PR-AUC)."""
-    if not baselines: return None, 0.0
-    best_name = max(baselines, key=lambda k: baselines[k].get('pr_auc', 0))
-    return baselines[best_name], baselines[best_name].get('pr_auc', 0)
+    if evaluation.get("schema_version") != 3:
+        raise ArtifactContractError("Evaluation results use a legacy schema")
+    if baselines.get("schema_version") != 3:
+        raise ArtifactContractError("Baseline results use a legacy schema")
+    expected_task = "binary_any_reported_event_positive_unlabeled"
+    if evaluation.get("task") != expected_task:
+        raise ArtifactContractError("Evaluation task is not the PU benchmark")
+    if baselines.get("task") != expected_task:
+        raise ArtifactContractError("Baseline task is not the PU benchmark")
+    if evaluation.get("checkpoint_sha256") != metadata.get("checkpoint_sha256"):
+        raise ArtifactContractError(
+            "Evaluation results belong to a different checkpoint"
+        )
+    if (
+        evaluation.get("data_records_sha256")
+        != baselines.get("data_records_sha256")
+    ):
+        raise ArtifactContractError(
+            "Model and baseline results use different data records"
+        )
+    if evaluation.get("split") != baselines.get("split"):
+        raise ArtifactContractError(
+            "Model and baseline results use different split contracts"
+        )
+    try:
+        require_matching_cohorts(
+            evaluation.get("effective_cohorts"), baselines.get("effective_cohorts"),
+        )
+    except ValueError as exc:
+        raise ArtifactContractError(str(exc)) from exc
+    return evaluation, baselines
 
-def plot_radar_chart(baselines, gnn):
-    """Generate the 'Board Meeting' Radar Chart."""
-    print("Generating Radar Chart...")
-
-    # Metrics to display
-    labels = ['ROC-AUC', 'PR-AUC', 'F1', 'Accuracy']
-    keys = ['roc_auc', 'pr_auc', 'f1', 'accuracy']
-    N = len(labels)
-
-    # Compute angles
-    angles = [n / float(N) * 2 * pi for n in range(N)]
-    angles += angles[:1] # Close the loop
-
-    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
-    ax.set_theta_offset(pi / 2)
-    ax.set_theta_direction(-1)
-
-    plt.xticks(angles[:-1], labels)
-    ax.set_rlabel_position(0)
-    plt.yticks([0.2, 0.4, 0.6, 0.8], ["0.2", "0.4", "0.6", "0.8"], color="grey", size=7)
-    plt.ylim(0, 1)
-
-    # Plot Baselines (Lightly)
-    for name, metrics in baselines.items():
-        if name == 'metadata': continue
-        values = [metrics.get(k, 0) for k in keys]
-        values += values[:1]
-        ax.plot(angles, values, linewidth=1, linestyle='solid', label=metrics['name'], alpha=0.4)
-        ax.fill(angles, values, alpha=0.05)
-
-    # Plot GNN (Bold)
-    if gnn:
-        values = [gnn.get(k, 0) for k in keys]
-        values += values[:1]
-        ax.plot(angles, values, linewidth=2, linestyle='solid', color='red', label=gnn['name'])
-        ax.fill(angles, values, color='red', alpha=0.15)
-
-    plt.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1))
-    plt.title("Model Capabilities Profile", y=1.08)
-
-    out_path = os.path.join(ARTIFACT_DIR, 'comparison_radar.png')
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close()
-
-def plot_bar_comparison(baselines, gnn):
-    """Generate PR-AUC Bar Comparison."""
-    print("Generating Bar Comparison...")
-
-    models = []
-    scores = []
-    colors = []
-
-    # Add Baselines
-    for name, metrics in baselines.items():
-        if name == 'metadata': continue
-        models.append(metrics.get('name', name))
-        scores.append(metrics.get('pr_auc', 0))
-        colors.append('grey')
-
-    # Add GNN
-    if gnn:
-        models.append(gnn.get('name', 'GNN'))
-        scores.append(gnn.get('pr_auc', 0))
-        colors.append('#d62728') # Standard red
-
-    y_pos = np.arange(len(models))
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    bars = ax.barh(y_pos, scores, align='center', color=colors)
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(models)
-    ax.invert_yaxis()
-    ax.set_xlabel('PR-AUC (Precision-Recall Area Under Curve)')
-    ax.set_title('Primary Metric Comparison (PR-AUC)')
-    ax.set_xlim(0, 1.0)
-
-    # Add text labels
-    for i, v in enumerate(scores):
-        ax.text(v + 0.01, i, f"{v:.3f}", color='black', va='center', fontweight='bold')
-
-    out_path = os.path.join(ARTIFACT_DIR, 'comparison_bars.png')
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close()
-
-def print_executive_summary(baselines, gnn, meta):
-    """Print the text investors care about."""
-    print("\n" + "="*80)
-    print(f"BIOGUARD EXECUTIVE SUMMARY (Split: {meta.get('split_type', 'UNKNOWN').upper()})")
-    print("="*80)
-
-    # 1. Identify Leader
-    best_base_metric, best_base_score = get_best_baseline(baselines)
-    gnn_score = gnn.get('pr_auc', 0) if gnn else 0
-
-    print(f"{'Model':<30} | {'PR-AUC':<8} | {'ROC-AUC':<8} | {'Status'}")
-    print("-" * 80)
-
-    # Print Baselines
-    for name, m in baselines.items():
-        print(f"{m['name']:<30} | {m.get('pr_auc',0):.4f}   | {m.get('roc_auc',0):.4f}   | Baseline")
-
-    # Print GNN
-    if gnn:
-        print("-" * 80)
-        print(f"{gnn['name']:<30} | {gnn_score:.4f}   | {gnn.get('roc_auc',0):.4f}   | CHALLENGER")
-
-    print("="*80)
-
-    # 2. The Verdict
-    if not gnn:
-        print("Status: GNN not evaluated yet.")
-        return
-
-    delta = gnn_score - best_base_score
-    pct_gain = (delta / best_base_score * 100) if best_base_score > 0 else 0
-
-    print(f"\nPERFORMANCE DELTA: {delta:+.4f} PR-AUC ({pct_gain:+.1f}%)")
-
-    if delta > 0.10:
-        print("VERDICT: [GREEN LIGHT] Transformative improvement. Proceed to production.")
-    elif delta > 0.03:
-        print("VERDICT: [YELLOW LIGHT] Solid improvement. Justifies compute cost.")
-    elif delta > 0:
-        print("VERDICT: [ORANGE LIGHT] Marginal gain. Optimize hyperparameters or data.")
-    else:
-        print("VERDICT: [RED LIGHT] Failed to beat baseline. Do not deploy.")
-        print("   -> Check for: Overfitting, Data Leakage in Baselines, or Featurization bugs.")
 
 def main():
-    data = load_data()
+    import matplotlib.pyplot as plt
 
-    if not data['baselines'] and not data['gnn']:
-        print("No results found in artifacts/. Run 'train', 'baselines', and 'eval' first.")
-        return
+    evaluation, baselines = load_comparable_results()
+    model_records = [
+        (
+            "BioGuardGAT",
+            evaluation["pu_roc_auc"],
+            evaluation["pu_pr_auc"],
+        )
+    ]
+    model_records.extend(
+        (
+            values.get("name", name),
+            values["pu_roc_auc"],
+            values["pu_pr_auc"],
+        )
+        for name, values in baselines["models"].items()
+    )
 
-    # Text Report
-    print_executive_summary(data['baselines'], data['gnn'], data['meta'])
+    names = [record[0] for record in model_records]
+    roc_values = [record[1] for record in model_records]
+    pr_values = [record[2] for record in model_records]
+    positions = np.arange(len(names))
+    width = 0.38
 
-    # Visualizations
-    if data['baselines'] or data['gnn']:
-        plot_bar_comparison(data['baselines'], data['gnn'])
-        plot_radar_chart(data['baselines'], data['gnn'])
-        print("\n[Artifacts Generated]")
-        print(f"- {os.path.join(ARTIFACT_DIR, 'comparison_radar.png')}")
-        print(f"- {os.path.join(ARTIFACT_DIR, 'comparison_bars.png')}")
+    figure, axis = plt.subplots(figsize=(10, 5))
+    axis.bar(positions - width / 2, roc_values, width, label="PU ROC-AUC")
+    axis.bar(positions + width / 2, pr_values, width, label="PU PR-AUC")
+    axis.set_xticks(positions)
+    axis.set_xticklabels(names, rotation=20, ha="right")
+    axis.set_ylim(0, 1)
+    axis.set_ylabel("Observed-positive vs unlabeled ranking metric")
+    axis.set_title(
+        f"PU benchmark comparison: {evaluation['split']}"
+    )
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(OUTPUT_PATH, dpi=200)
+    plt.close(figure)
+
+    print(
+        "Comparison is limited to observed-positive versus sampled-unlabeled "
+        "ranking and is not a clinical validation."
+    )
+    print(f"Figure written to {OUTPUT_PATH}")
+    return OUTPUT_PATH
+
 
 if __name__ == "__main__":
     main()

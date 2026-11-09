@@ -1,126 +1,133 @@
-import torch
-import numpy as np
-import os
-import sys
-import json
-import joblib
 import argparse
-from tqdm import tqdm
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    confusion_matrix
-)
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch_geometric.loader import DataLoader as PyGDataLoader
+from tqdm import tqdm
 
-# Internal Imports
-from .model import BioGuardGAT
-from .data_loader import load_twosides_data
+from .artifacts import ArtifactContractError, load_model_bundle
+from .config import ARTIFACT_DIR, DATA_DIR
+from .data_loader import load_twosides_binary_pu
+from .cohorts import cohort_manifest, require_matching_cohorts
+from .graph_cache import filter_cached_pairs
 from .enzyme import EnzymeManager
-# Import the dataset class from your updated training script
-from bioguard.train import BioGuardDataset
+from .train import BioGuardDataset, sample_membership_sha256
 
-# --- CONFIG ---
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-MODEL_PATH = os.path.join(ARTIFACT_DIR, 'model.pt')
-CALIBRATOR_PATH = os.path.join(ARTIFACT_DIR, 'calibrator.joblib')
-META_PATH = os.path.join(ARTIFACT_DIR, 'metadata.json')
-
-
-def load_metadata():
-    """Loads model training metadata to ensure architectural synchronization."""
-    if not os.path.exists(META_PATH):
-        return {}
-    with open(META_PATH, 'r') as f:
-        return json.load(f)
+EVAL_RESULTS_PATH = Path(ARTIFACT_DIR) / "eval_results.json"
 
 
 def evaluate_model(override_split=None):
-    # Auto-detect device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # 1. Load Metadata (The Source of Truth)
-    meta = load_metadata()
-    if not meta:
-        print(f"[WARNING] No metadata found at {META_PATH}. Using defaults.")
+    bundle = load_model_bundle(
+        ARTIFACT_DIR,
+        device=device,
+        supporting_file_root=Path(DATA_DIR).parent,
+    )
+    meta = bundle.metadata
+    split_type = meta.get("split_type")
+    if not split_type:
+        raise ArtifactContractError(
+            "The checkpoint has no verified split_type and cannot be evaluated "
+            "under the new data contract."
+        )
+    if override_split and override_split != split_type:
+        raise ArtifactContractError(
+            "Evaluation split overrides are forbidden because they break the "
+            f"training contract: checkpoint={split_type}, requested={override_split}"
+        )
+    if (
+        meta.get("scientific_task")
+        != "binary_any_reported_event_positive_unlabeled"
+    ):
+        raise ArtifactContractError(
+            "This evaluator only accepts checkpoints trained under the explicit "
+            "positive-unlabeled data contract."
+        )
 
-    # Dynamically extract architecture parameters
-    node_dim = meta.get('node_dim', 46)  # Using your verified 46-dim node features
-    edge_dim = meta.get('edge_dim', 8)
-    embedding_dim = meta.get('embedding_dim', 128)
-    heads = meta.get('heads', 4)
-
-    # Training Params
-    train_split = meta.get('split_type', 'cold_drug')
-    threshold = meta.get('threshold', 0.5)  # Standard clinical threshold
-
-    # Allow overriding the split for cross-validation tests
-    split_type = override_split if override_split else train_split
-
-    print("--- BioGuard Final Clinical Evaluation ---")
-    print(f"Architecture: Dim={embedding_dim}, Heads={heads}")
+    print("--- BioGuard Positive-Unlabeled Ranking Evaluation ---")
+    print(
+        f"Architecture: Dim={bundle.spec.embedding_dim}, "
+        f"Heads={bundle.spec.heads}"
+    )
     print(f"Eval Split:   {split_type.upper()}")
-    print(f"Threshold:    {threshold:.4f}")
+    print(f"Class Prior:  {meta['class_prior']:.4f}")
 
-    # 2. Load Data
     print("\nLoading holdout data...")
-    df = load_twosides_data(split_method=split_type)
-    test_df = df[df['split'] == 'test'].reset_index(drop=True)
+    data_bundle = load_twosides_binary_pu(
+        split_method=split_type,
+        train_unlabeled_ratio=float(meta["unlabeled_ratio"]),
+        val_unlabeled_ratio=float(meta["unlabeled_ratio"]),
+        test_unlabeled_ratio=float(meta["unlabeled_ratio"]),
+        random_seed=int(meta["random_seed"]),
+    )
+    expected_data_hash = (
+        meta.get("data_manifest", {}).get("records_sha256")
+    )
+    if data_bundle.manifest["records_sha256"] != expected_data_hash:
+        raise ArtifactContractError(
+            "Evaluation data hash does not match the checkpoint training manifest"
+        )
+    df = data_bundle.records
+    test_df = df[df["split"] == "test"].reset_index(drop=True)
+    if test_df["target"].nunique() != 2:
+        raise ValueError(
+            "PU ranking evaluation requires positive and unlabeled test samples"
+        )
 
-    # 3. Initialize Enzyme Manager (Strict Dimension Check)
     enzyme_manager = EnzymeManager(allow_degraded=False)
-    enzyme_dim = enzyme_manager.vector_dim
+    if enzyme_manager.vector_dim != bundle.spec.enzyme_dim:
+        raise ArtifactContractError(
+            "Enzyme feature schema does not match checkpoint: "
+            f"manager={enzyme_manager.vector_dim}, "
+            f"checkpoint={bundle.spec.enzyme_dim}"
+        )
+    model = bundle.model
 
-    # 4. Initialize Model (Adaptive Ensemble Gate Architecture)
-    model = BioGuardGAT(
-        node_dim=node_dim,
-        edge_dim=edge_dim,
-        embedding_dim=embedding_dim,
-        heads=heads,
-        enzyme_dim=enzyme_dim
-    ).to(device)
-
-    if not os.path.exists(MODEL_PATH):
-        print(f"CRITICAL: Model weights missing at {MODEL_PATH}")
-        sys.exit(1)
-
-    print(f"Loading weights from {MODEL_PATH}...")
-    try:
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
-        print("[OK] Model weights loaded successfully")
-    except Exception as e:
-        print(f"[ERROR] Failed to load weights: {e}")
-        sys.exit(1)
-
-    model.eval()
-
-    # 5. Initialize Dataset & Loader
-    test_dataset = BioGuardDataset(root=DATA_DIR, df=test_df, split='test')
-    test_loader = PyGDataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=0)
+    test_dataset = BioGuardDataset(
+        root=DATA_DIR,
+        df=test_df,
+        split="test",
+        enzyme_manager=enzyme_manager,
+    )
+    if len(test_dataset) == 0:
+        raise ValueError("The requested test split has no LMDB-backed samples")
+    expected_test_membership = (
+        meta.get("lmdb_effective_samples", {})
+        .get("test", {})
+        .get("sample_membership_sha256")
+    )
+    if sample_membership_sha256(test_dataset.df) != expected_test_membership:
+        raise ArtifactContractError(
+            "LMDB-filtered test membership does not match the checkpoint manifest"
+        )
+    effective = filter_cached_pairs(df, test_dataset.lmdb_path)
+    effective_cohorts = cohort_manifest(effective)
+    require_matching_cohorts(meta.get("effective_cohorts"), effective_cohorts)
+    test_loader = PyGDataLoader(
+        test_dataset,
+        batch_size=128,
+        shuffle=False,
+        num_workers=0,
+    )
 
     print(f"[Test] Running inference on {len(test_dataset)} pairs...")
 
     y_true = []
     y_raw_probs = []
-    alpha_vals = []  # Track the trust balance between GAT and Prior
+    alpha_vals = []
 
-    # 6. Inference Loop (Unpacking the Ensemble Tuple)
     with torch.no_grad():
         for batch_data in tqdm(test_loader, desc="Testing"):
             batch_a = batch_data[0].to(device)
             batch_b = batch_data[1].to(device)
             batch_y = batch_data[2].to(device)
 
-            # Unpack the tuple: (final_logits, alpha_gate)
             logits, alpha = model(batch_a, batch_b)
-
             probs = torch.sigmoid(logits)
 
             y_true.extend(batch_y.cpu().numpy().flatten())
@@ -131,36 +138,61 @@ def evaluate_model(override_split=None):
     y_raw_probs = np.array(y_raw_probs)
     mean_alpha = np.mean(alpha_vals)
 
-    # 7. Final Metrics
-    y_pred = (y_raw_probs >= threshold).astype(int)
-
     roc_auc = roc_auc_score(y_true, y_raw_probs)
     pr_auc = average_precision_score(y_true, y_raw_probs)
-    acc = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    rec = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
-
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
     print("\n" + "=" * 60)
-    print("FINAL CLINICAL RESULTS SUMMARY")
+    print("OBSERVED-POSITIVE VS UNLABELED RANKING SUMMARY")
     print("=" * 60)
-    print(f"  ROC-AUC     : {roc_auc:.4f}")
-    print(f"  PR-AUC      : {pr_auc:.4f} (AUPRC)")
-    print(f"  Mean Alpha  : {mean_alpha:.4f} <-- (0.0=Prior, 1.0=Graph)")
-    print("-" * 60)
-    print(f"  Accuracy    : {acc:.4f}")
-    print(f"  Precision   : {prec:.4f}")
-    print(f"  Recall      : {rec:.4f}")
-    print(f"  Specificity : {specificity:.4f}")
-    print(f"  F1 Score    : {f1:.4f}")
+    print(f"  PU ROC-AUC  : {roc_auc:.4f}")
+    print(f"  PU PR-AUC   : {pr_auc:.4f}")
+    print(f"  Mean Alpha  : {mean_alpha:.4f}")
     print("=" * 60)
+
+    results = {
+        "schema_version": 3,
+        "name": "BioGuardGAT",
+        "checkpoint_sha256": bundle.checkpoint_sha256,
+        "split": split_type,
+        "task": "binary_any_reported_event_positive_unlabeled",
+        "evaluation_semantics": (
+            "Observed TWOSIDES associations versus sampled unlabeled pairs; "
+            "unlabeled pairs are not confirmed negatives."
+        ),
+        "data_records_sha256": data_bundle.manifest["records_sha256"],
+        "class_prior": float(meta["class_prior"]),
+        "calibrated": False,
+        "effective_cohorts": effective_cohorts,
+        "test_coverage": len(test_dataset) / len(test_df),
+        "n_test": len(test_dataset),
+        "observed_positive_fraction": float(np.mean(y_true)),
+        "pu_roc_auc": float(roc_auc),
+        "pu_pr_auc": float(pr_auc),
+        "mean_alpha": float(mean_alpha),
+        "provenance_warning": (
+            "Metrics measure ranking of reported associations above sampled "
+            "unlabeled pairs. They do not estimate clinical discrimination, "
+            "incidence, causality, sensitivity, or specificity."
+        ),
+    }
+    predictions = test_dataset.df.copy()
+    predictions["score"] = y_raw_probs
+    predictions["gate_value"] = alpha_vals
+    predictions.to_csv(EVAL_RESULTS_PATH.with_name("eval_predictions.csv"), index=False)
+    EVAL_RESULTS_PATH.write_text(
+        json.dumps(results, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Results written to {EVAL_RESULTS_PATH}")
+    return results
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--split', type=str, default=None)
+    parser.add_argument(
+        "--split",
+        choices=["pair_random", "drug_disjoint", "scaffold_disjoint"],
+        default=None,
+    )
     args = parser.parse_args()
     evaluate_model(args.split)

@@ -1,33 +1,35 @@
 """
-BioGuard V3 -- Drug-Drug Interaction Dashboard
+BioGuard research dashboard
 Streamlit interface for DDI prediction, model analytics, and enzyme profiling.
 """
 
-import streamlit as st
-import numpy as np
-import pandas as pd
-import torch
-import joblib
 import json
 import os
-import signal
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+import streamlit as st
+import torch
 from rdkit import Chem
-from rdkit.Chem import Draw, AllChem, Descriptors
+from rdkit.Chem import Descriptors, Draw
 from torch_geometric.data import Batch
 
-from bioguard.config import BASE_DIR, ARTIFACT_DIR, DATA_DIR, NODE_DIM, EDGE_DIM
-from bioguard.model import BioGuardGAT
-from bioguard.featurizer import GraphFeaturizer
+from bioguard.artifacts import (
+    ArtifactContractError,
+    load_calibrator,
+    load_model_bundle,
+)
+from bioguard.config import ARTIFACT_DIR, DATA_DIR, EDGE_DIM, NODE_DIM
 from bioguard.enzyme import EnzymeManager
+from bioguard.featurizer import GraphFeaturizer
+from bioguard.molecular import policy_for_metadata, prepare_molecule
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 MODEL_PATH = os.path.join(ARTIFACT_DIR, "model.pt")
-META_PATH = os.path.join(ARTIFACT_DIR, "metadata.json")
-CALIBRATOR_PATH = os.path.join(ARTIFACT_DIR, "calibrator.joblib")
 CALIBRATION_DATA_PATH = os.path.join(ARTIFACT_DIR, "calibration_data.npz")
 ENZYME_CSV = os.path.join(DATA_DIR, "enzyme_features_full.csv")
 
@@ -35,7 +37,6 @@ ENZYME_CSV = os.path.join(DATA_DIR, "enzyme_features_full.csv")
 # Limits for community cloud
 # ---------------------------------------------------------------------------
 MAX_HEAVY_ATOMS = 80
-CONFORMER_TIMEOUT_SEC = 45
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -105,43 +106,46 @@ def smiles_to_image(smiles, size=(280, 200)):
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def load_model():
-    meta = {}
-    if os.path.exists(META_PATH):
-        with open(META_PATH) as f:
-            meta = json.load(f)
-
-    enzyme_manager = EnzymeManager(allow_degraded=True)
-
-    node_dim = meta.get("node_dim", NODE_DIM)
-    embedding_dim = meta.get("embedding_dim", 128)
-    heads = meta.get("heads", 4)
-    enzyme_dim = meta.get("enzyme_dim", enzyme_manager.vector_dim)
-    threshold = meta.get("threshold", 0.5)
-
     device = torch.device("cpu")
-    model = BioGuardGAT(
-        node_dim=node_dim,
-        embedding_dim=embedding_dim,
-        heads=heads,
-        enzyme_dim=enzyme_dim,
-    ).to(device)
-
-    model_ready = False
-    if os.path.exists(MODEL_PATH):
-        try:
-            model.load_state_dict(
-                torch.load(MODEL_PATH, map_location=device, weights_only=True)
+    try:
+        bundle = load_model_bundle(
+            ARTIFACT_DIR,
+            device=device,
+            supporting_file_root=Path(__file__).resolve().parent,
+        )
+        enzyme_manager = EnzymeManager(allow_degraded=False)
+        if enzyme_manager.vector_dim != bundle.spec.enzyme_dim:
+            raise ArtifactContractError(
+                "Enzyme feature schema does not match checkpoint: "
+                f"manager={enzyme_manager.vector_dim}, "
+                f"checkpoint={bundle.spec.enzyme_dim}"
             )
-            model.eval()
-            model_ready = True
-        except Exception as e:
-            st.error(f"Model load failed: {e}")
-
-    calibrator = None
-    if os.path.exists(CALIBRATOR_PATH):
-        calibrator = joblib.load(CALIBRATOR_PATH)
-
-    return model, model_ready, enzyme_manager, calibrator, threshold, enzyme_dim, meta
+        calibrator = load_calibrator(ARTIFACT_DIR, bundle.metadata)
+        threshold = float(bundle.metadata.get("threshold", 0.5))
+        if not 0.0 <= threshold <= 1.0:
+            raise ArtifactContractError(
+                f"Threshold must be within [0, 1], got {threshold}"
+            )
+        return (
+            bundle.model,
+            True,
+            enzyme_manager,
+            calibrator,
+            threshold,
+            bundle.spec.enzyme_dim,
+            bundle.metadata,
+        )
+    except (ArtifactContractError, OSError, ValueError) as exc:
+        st.error(f"Model artifact contract failed: {exc}")
+        return (
+            None,
+            False,
+            None,
+            None,
+            0.5,
+            0,
+            {},
+        )
 
 
 @st.cache_resource
@@ -159,20 +163,38 @@ def load_enzyme_df():
 @st.cache_data
 def load_calibration_data():
     if os.path.exists(CALIBRATION_DATA_PATH):
-        return dict(np.load(CALIBRATION_DATA_PATH, allow_pickle=True))
+        return dict(np.load(CALIBRATION_DATA_PATH, allow_pickle=False))
     return None
 
 
+@st.cache_data
+def load_evaluation_data(expected_checkpoint_sha256):
+    path = os.path.join(ARTIFACT_DIR, "eval_results.json")
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            result = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"Evaluation results could not be read: {exc}"
+
+    if not isinstance(result, dict) or result.get("schema_version") not in (2, 3):
+        return None, "Evaluation results use an unsupported or legacy schema."
+    if result.get("checkpoint_sha256") != expected_checkpoint_sha256:
+        return None, "Evaluation results belong to a different model checkpoint."
+    return result, None
+
+
 @st.cache_data(show_spinner=False)
-def featurize_molecule(_featurizer, smiles):
+def featurize_molecule(_featurizer, smiles, policy):
     """Cache 3D graph generation per SMILES so repeat predictions skip ETKDGv3."""
-    return _featurizer.smiles_to_graph(smiles.strip())
+    return _featurizer.smiles_to_graph(smiles.strip(), policy=policy)
 
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-st.sidebar.title("BioGuard V3")
+st.sidebar.title("BioGuard Research")
 st.sidebar.caption("Drug-Drug Interaction Prediction")
 
 page = st.sidebar.radio(
@@ -186,10 +208,17 @@ featurizer = load_featurizer()
 
 st.sidebar.divider()
 st.sidebar.markdown(f"**Model status:** {'Ready' if model_ready else 'Not loaded'}")
-st.sidebar.markdown(f"**Device:** CPU")
+st.sidebar.markdown("**Device:** CPU")
 if meta:
     st.sidebar.markdown(f"**Split:** {meta.get('split_type', 'N/A')}")
+    st.sidebar.markdown(
+        f"**Task:** {meta.get('scientific_task', 'unknown legacy task')}"
+    )
     st.sidebar.markdown(f"**Threshold:** {meta.get('threshold', 0.5):.2f}")
+    if meta.get("legacy_unverified"):
+        st.sidebar.warning("Legacy model: training provenance is not verified.")
+    if not meta.get("threshold_validated", False):
+        st.sidebar.warning("The operating threshold is not validated.")
 
 
 # ===================================================================
@@ -197,7 +226,11 @@ if meta:
 # ===================================================================
 if page == "Predict DDI":
     st.title("Drug-Drug Interaction Prediction")
-    st.markdown("Enter two drug SMILES strings to predict potential interactions.")
+    st.warning(
+        "Research-use prototype. Scores are not clinical risk estimates and "
+        "must not guide medication decisions."
+    )
+    st.markdown("Enter two drug SMILES strings to generate a screening score.")
 
     col_a, col_b = st.columns(2)
 
@@ -264,35 +297,37 @@ if page == "Predict DDI":
             else:
                 with st.spinner("Generating 3D conformers and running inference..."):
                     try:
-                        # Featurize (cached per SMILES, with timeout)
-                        data_a = featurize_molecule(featurizer, smiles_a)
-                        data_b = featurize_molecule(featurizer, smiles_b)
-
-                        # Canonicalize for enzyme lookup
-                        can_a = Chem.MolToSmiles(
-                            Chem.MolFromSmiles(smiles_a.strip()), isomericSmiles=False
+                        policy = policy_for_metadata(meta)
+                        normalized_a, can_a = prepare_molecule(
+                            smiles_a, policy, max_heavy_atoms=MAX_HEAVY_ATOMS,
                         )
-                        can_b = Chem.MolToSmiles(
-                            Chem.MolFromSmiles(smiles_b.strip()), isomericSmiles=False
+                        normalized_b, can_b = prepare_molecule(
+                            smiles_b, policy, max_heavy_atoms=MAX_HEAVY_ATOMS,
                         )
+                        data_a = featurize_molecule(featurizer, normalized_a, policy)
+                        data_b = featurize_molecule(featurizer, normalized_b, policy)
 
                         # Enzyme vectors
                         vec_a = enzyme_manager.get_by_smiles(can_a)
                         vec_b = enzyme_manager.get_by_smiles(can_b)
+                        known_a = can_a in enzyme_manager.smiles_map
+                        known_b = can_b in enzyme_manager.smiles_map
 
-                        # Pad/truncate to expected enzyme_dim
-                        def fit_enzyme_vec(vec, dim):
-                            if len(vec) == dim:
-                                return vec
-                            out = np.zeros(dim, dtype=np.float32)
-                            n = min(len(vec), dim)
-                            out[:n] = vec[:n]
-                            return out
-
-                        vec_a = fit_enzyme_vec(vec_a, enzyme_dim)
-                        vec_b = fit_enzyme_vec(vec_b, enzyme_dim)
+                        if len(vec_a) != enzyme_dim or len(vec_b) != enzyme_dim:
+                            raise ValueError(
+                                "Enzyme feature schema mismatch: "
+                                f"expected {enzyme_dim}, got "
+                                f"A={len(vec_a)} and B={len(vec_b)}"
+                            )
 
                         has_enzymes = np.any(vec_a) or np.any(vec_b)
+                        if not known_a or not known_b:
+                            st.warning(
+                                "At least one molecule is absent from the "
+                                "legacy enzyme table. The bundled fallback "
+                                "predictor is unavailable, so its enzyme "
+                                "vector is all zeros."
+                            )
 
                         # Attach enzyme vectors
                         data_a.enzyme_a = torch.tensor(
@@ -319,43 +354,47 @@ if page == "Predict DDI":
                             )
                             calib_prob = max(0.0, min(1.0, calib_prob))
 
-                        risk = "High" if calib_prob >= threshold else "Low"
+                        threshold_validated = bool(
+                            meta.get("threshold_validated", False)
+                        )
+                        risk = (
+                            "High" if calib_prob >= threshold else "Low"
+                        ) if threshold_validated else "Unvalidated"
 
                         # Display results
                         st.divider()
                         st.subheader("Prediction Results")
 
                         c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Risk Level", risk)
-                        c2.metric("Calibrated Probability", f"{calib_prob:.3f}")
+                        c1.metric("Threshold Status", risk)
+                        c2.metric(
+                            "Calibrated Score" if calibrator else "Model Score",
+                            f"{calib_prob:.3f}",
+                        )
                         c3.metric("Raw Score", f"{raw_prob:.3f}")
                         c4.metric("Alpha (Graph Weight)", f"{alpha_val:.3f}")
 
-                        # Risk gauge
+                        gauge_config = {
+                            "axis": {"range": [0, 1]},
+                            "bar": {"color": "#636efa"},
+                            "steps": [
+                                {"range": [0, 0.5], "color": "#e8eaf6"},
+                                {"range": [0.5, 1], "color": "#c5cae9"},
+                            ],
+                        }
+                        if threshold_validated:
+                            gauge_config["threshold"] = {
+                                "line": {"color": "black", "width": 3},
+                                "thickness": 0.8,
+                                "value": threshold,
+                            }
+
                         fig_gauge = go.Figure(
                             go.Indicator(
                                 mode="gauge+number",
-                                value=calib_prob * 100,
-                                title={"text": "Interaction Risk (%)"},
-                                gauge={
-                                    "axis": {"range": [0, 100]},
-                                    "bar": {
-                                        "color": "#ff4b4b"
-                                        if risk == "High"
-                                        else "#00cc96"
-                                    },
-                                    "steps": [
-                                        {"range": [0, 30], "color": "#e8f5e9"},
-                                        {"range": [30, 50], "color": "#fff9c4"},
-                                        {"range": [50, 70], "color": "#ffe0b2"},
-                                        {"range": [70, 100], "color": "#ffcdd2"},
-                                    ],
-                                    "threshold": {
-                                        "line": {"color": "black", "width": 3},
-                                        "thickness": 0.8,
-                                        "value": threshold * 100,
-                                    },
-                                },
+                                value=calib_prob,
+                                title={"text": "Research ranking score"},
+                                gauge=gauge_config,
                             )
                         )
                         fig_gauge.update_layout(
@@ -368,8 +407,9 @@ if page == "Predict DDI":
                             tel_c1, tel_c2 = st.columns(2)
                             with tel_c1:
                                 st.markdown(
-                                    f"**Enzyme Status:** "
-                                    f"{'Active' if has_enzymes else 'Silent (No Features)'}"
+                                    "**Enzyme table lookup:** "
+                                    f"A={'known' if known_a else 'unseen'}, "
+                                    f"B={'known' if known_b else 'unseen'}"
                                 )
                                 st.markdown(f"**Alpha Gate:** {alpha_val:.4f}")
                                 st.caption(
@@ -385,7 +425,7 @@ if page == "Predict DDI":
                                     )
                                 )
                                 fig_alpha.update_layout(
-                                    title="Pathway Contribution",
+                                    title="Learned Gate Weights",
                                     yaxis_title="Weight",
                                     height=280,
                                     margin=dict(t=40, b=20),
@@ -445,11 +485,10 @@ if page == "Predict DDI":
 elif page == "Model Performance":
     st.title("Model Performance")
 
-    eval_path = os.path.join(ARTIFACT_DIR, "eval_results.json")
-    eval_data = None
-    if os.path.exists(eval_path):
-        with open(eval_path) as f:
-            eval_data = json.load(f)
+    expected_hash = meta.get("checkpoint_sha256") if meta else None
+    eval_data, eval_warning = load_evaluation_data(expected_hash)
+    if eval_warning:
+        st.warning(eval_warning)
 
     if meta:
         st.subheader("Training Configuration")
@@ -466,18 +505,25 @@ elif page == "Model Performance":
 
     if eval_data:
         st.divider()
-        st.subheader("Evaluation Metrics (Holdout Test Set)")
+        st.subheader("Positive-Unlabeled Ranking Metrics")
+        st.warning(eval_data.get("provenance_warning", "Research use only."))
 
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("ROC-AUC", f"{eval_data.get('roc_auc', 0):.4f}")
-        m2.metric("PR-AUC", f"{eval_data.get('pr_auc', 0):.4f}")
-        m3.metric("Recall", f"{eval_data.get('recall', 0):.4f}")
-        m4.metric("Precision", f"{eval_data.get('precision', 0):.4f}")
-        m5.metric("F1 Score", f"{eval_data.get('f1', 0):.4f}")
-        m6.metric("Accuracy", f"{eval_data.get('accuracy', 0):.4f}")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("PU ROC-AUC", f"{eval_data.get('pu_roc_auc', 0):.4f}")
+        m2.metric("PU PR-AUC", f"{eval_data.get('pu_pr_auc', 0):.4f}")
+        m3.metric("Test Pairs", f"{eval_data.get('n_test', 0):,}")
+        m4.metric(
+            "Observed Positive Fraction",
+            f"{eval_data.get('observed_positive_fraction', 0):.3f}",
+        )
+        m5.metric("Mean Alpha", f"{eval_data.get('mean_alpha', 0):.3f}")
 
     # Calibration plot
-    cal_data = load_calibration_data()
+    cal_data = (
+        load_calibration_data()
+        if meta.get("calibrator_enabled", False)
+        else None
+    )
     if cal_data is not None:
         st.divider()
         st.subheader("Calibration Analysis")
@@ -567,10 +613,10 @@ elif page == "Model Performance":
     | Component | Details |
     |-----------|---------|
     | **Graph Pathway** | GATv2, 2 layers, 4 heads, 128-dim embeddings, mean+max pool |
-    | **Prior Pathway** | Metabolic enzyme vectors (60-dim from ChEMBL, 15-dim LightGBM fallback) |
-    | **Alpha Gate** | Learned sigmoid gate weighting graph vs. prior (converges ~0.81) |
-    | **Loss** | BioFocalLoss (gamma=2.0, alpha=0.70) for class imbalance |
-    | **Evaluation** | Bemis-Murcko scaffold-disjoint split (true OOD) |
+    | **Prior Pathway** | 60-dimensional legacy enzyme table; unseen drugs currently receive zero vectors |
+    | **Alpha Gate** | Learned sigmoid gate over graph and prior logits; not a causal attribution |
+    | **Loss** | Non-negative positive-unlabeled risk with a declared class-prior assumption |
+    | **Evaluation** | Observed-positive versus sampled-unlabeled ranking; not clinical classification |
     """)
 
 
@@ -735,23 +781,29 @@ elif page == "Enzyme Explorer":
 # PAGE: About
 # ===================================================================
 elif page == "About":
-    st.title("About BioGuard V3")
+    st.title("About BioGuard")
 
     st.markdown("""
-    ### Drug-Drug Interaction Prediction with Adaptive Graph Attention Networks
+    ### Research prototype for paired-molecule DDI scoring
 
-    BioGuard V3 is a production-grade DDI prediction system designed for
-    **New Chemical Entities (NCEs)** that uses an adaptive Graph Attention
-    Network with a metabolic prior ensemble.
+    BioGuard is an experimental adaptive Graph Attention Network with a
+    metabolic-feature branch. The current legacy checkpoint does not have
+    sufficient training provenance or external validation for clinical use.
 
-    #### Key Features
+    #### Current capabilities
 
     - **Adaptive Alpha Gate**: Learns to weight structural (graph) vs. metabolic (prior) evidence
     - **3D Molecular Graphs**: ETKDGv3 conformer generation with spatial edge features
-    - **Scaffold-Disjoint Evaluation**: True out-of-distribution testing (no inflated metrics)
-    - **CYP450 Metabolic Priors**: 60-dimensional enzyme profiles from ChEMBL with LightGBM fallback
-    - **Isotonic Calibration**: Calibrated probabilities for clinical decision support
-    - **High-Recall Safety Net**: Prioritizes catching DDIs (recall ~0.81) over precision
+    - **CYP450 Feature Branch**: 60-dimensional legacy enzyme table
+    - **Artifact Contract**: Checkpoint, metadata, and feature dimensions are verified before loading
+
+    #### Important limitations
+
+    - Scores are not calibrated clinical probabilities.
+    - The operating threshold is not clinically validated.
+    - Dose, route, exposure, timing, patient context, and interaction severity are not modeled.
+    - The current checkpoint has unknown training provenance; the stored legacy calibrator is disabled.
+    - Molecules absent from the enzyme table currently receive zero vectors, not inferred enzyme activity.
 
     #### Architecture
 
@@ -759,8 +811,8 @@ elif page == "About":
     1. **Graph Pathway**: GATv2 operating on 3D molecular graphs (46-dim node features, 8-dim edge features)
     2. **Prior Pathway**: Metabolic enzyme vectors processed through a learned MLP
 
-    A sigmoid alpha gate adaptively weights these pathways
-    (converges to ~0.81, preferring structural evidence).
+    A sigmoid alpha gate combines the two logits. Its value is telemetry, not
+    a causal explanation of the prediction.
 
     #### Citation
 

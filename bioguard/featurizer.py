@@ -1,8 +1,9 @@
 import numpy as np
 import torch
 from rdkit import Chem
-from rdkit.Chem import Descriptors, rdchem, AllChem, rdFreeSASA, Descriptors3D
+from rdkit.Chem import AllChem, Descriptors3D, rdchem, rdFreeSASA
 from torch_geometric.data import Data
+from .molecular import STANDARDIZATION_POLICY, normalize_smiles
 
 
 class GraphFeaturizer:
@@ -19,7 +20,8 @@ class GraphFeaturizer:
         self.edge_dim = 8
 
     def _one_hot(self, x, allowable_set):
-        if x not in allowable_set: x = allowable_set[-1]
+        if x not in allowable_set:
+            x = allowable_set[-1]
         return list(map(lambda s: x == s, allowable_set))
 
     def _get_3d_features(self, mol, num_confs=5):
@@ -44,7 +46,7 @@ class GraphFeaturizer:
                 c = float(mol_3d.GetAtomWithIdx(i).GetProp('_GasteigerCharge'))
                 if np.isnan(c) or np.isinf(c):
                     c = 0.0
-            except:
+            except (KeyError, RuntimeError, TypeError, ValueError):
                 c = 0.0
             # [mean, std, min, max] -> std is 0 for topological charges
             charge_stats.append([c, 0.0, c, c])
@@ -60,11 +62,11 @@ class GraphFeaturizer:
                     try:
                         v = float(mol_3d.GetAtomWithIdx(i).GetProp("SASA"))
                         vals.append(v if not np.isnan(v) else 0.0)
-                    except:
+                    except (KeyError, RuntimeError, TypeError, ValueError):
                         vals.append(0.0)
                 sasa_vals.append(vals)
             sasa_mean = np.mean(sasa_vals, axis=0).tolist()
-        except:
+        except (RuntimeError, TypeError, ValueError):
             # Fallback if SASA fails entirely
             sasa_mean = [0.0] * num_atoms
 
@@ -75,21 +77,21 @@ class GraphFeaturizer:
             try:
                 v = AllChem.ComputeMolVolume(mol_3d, confId=cid)
                 vols.append(v if not np.isnan(v) else 0.0)
-            except:
+            except (RuntimeError, TypeError, ValueError):
                 vols.append(0.0)
 
             # Radius of Gyration
             try:
                 g = Descriptors3D.RadiusOfGyration(mol_3d, confId=cid)
                 gyrs.append(g if not np.isnan(g) else 0.0)
-            except:
+            except (RuntimeError, TypeError, ValueError):
                 gyrs.append(0.0)
 
             # Asphericity (Handles divide-by-zero for single atoms/linear molecules)
             try:
                 a = Descriptors3D.Asphericity(mol_3d, confId=cid)
                 asphs.append(a if not np.isnan(a) else 0.0)
-            except:
+            except (RuntimeError, TypeError, ValueError):
                 asphs.append(0.0)
 
         # Safely compute means
@@ -103,7 +105,8 @@ class GraphFeaturizer:
         dist_matrix = AllChem.Get3DDistanceMatrix(mol_3d, confId=ids[0])
         return charge_stats, sasa_mean, global_3d, dist_matrix
 
-    def smiles_to_graph(self, smiles):
+    def smiles_to_graph(self, smiles, policy=STANDARDIZATION_POLICY):
+        smiles = normalize_smiles(smiles, policy)
         mol = Chem.MolFromSmiles(smiles)
         if not mol:
             raise ValueError(f"Invalid SMILES string cannot be parsed by RDKit: {smiles}")

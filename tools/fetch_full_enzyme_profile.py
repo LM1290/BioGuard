@@ -1,36 +1,32 @@
-import pandas as pd
 import json
-import time
 import os
-import glob
+import time
+
+import pandas as pd
 from chembl_webresource_client.new_client import new_client
 from rdkit import Chem
 from tqdm import tqdm
+
+from bioguard.data_loader import load_twosides_relations
 
 
 def get_chembl_id(smiles):
     try:
         mol = Chem.MolFromSmiles(smiles)
-        if not mol: return None
+        if not mol:
+            return None
         inchikey = Chem.MolToInchiKey(mol)
         res = new_client.molecule.filter(molecule_structures__standard_inchi_key=inchikey).only('molecule_chembl_id')
-        if res: return res[0]['molecule_chembl_id']
-    except:
+        if res:
+            return res[0]['molecule_chembl_id']
+    except Exception:
         return None
     return None
 
 
 def load_unique_drugs_from_parquet():
-    """Finds the latest parquet cache and extracts unique drugs."""
-    # Look for any v16 clean parquet file
-    files = glob.glob("data/twosides_*_v16_clean.parquet")
-    if not files:
-        raise FileNotFoundError("No cached parquet file found in data/. Run data_loader.py first.")
-
-    target_file = files[0]  # Pick the first one found
-    print(f"Loading drugs from {target_file}...")
-
-    df = pd.read_parquet(target_file)
+    """Extract unique drugs from the event-preserving relation contract."""
+    df = load_twosides_relations().records
 
     # Stack drug_a and drug_b to get unique list
     drugs_a = df[['drug_a', 'smiles_a']].rename(columns={'drug_a': 'drug_name', 'smiles_a': 'smiles'})
@@ -85,7 +81,8 @@ def main():
                         row_data[f"{cyp_name}_sub"] = 1
 
         results.append(row_data)
-        if idx % 10 == 0: time.sleep(0.1)
+        if idx % 10 == 0:
+            time.sleep(0.1)
 
     out_df = pd.DataFrame(results, columns=columns)
     out_df.to_csv('data/enzyme_features_full.csv', index=False)

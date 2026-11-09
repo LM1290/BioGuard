@@ -1,6 +1,8 @@
-import pandas as pd
-import glob
 import os
+
+import pandas as pd
+
+from bioguard.data_loader import load_twosides_relations
 
 
 def patch():
@@ -14,12 +16,8 @@ def patch():
     df_features = pd.read_csv(csv_path)
     print(f"Loaded {len(df_features)} rows from CSV.")
 
-    # 2. Load the source Parquet to get SMILES
-    files = glob.glob("data/twosides_*_v18_clean.parquet")
-    if not files:
-        print("Parquet file not found.")
-        return
-    df_parquet = pd.read_parquet(files[0])
+    # 2. Load standardized structures from the relation contract.
+    df_parquet = load_twosides_relations().records
 
     # Build a Drug Name -> SMILES map
     drugs_a = df_parquet[['drug_a', 'smiles_a']].rename(columns={'drug_a': 'drug_name', 'smiles_a': 'smiles'})

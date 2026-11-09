@@ -1,41 +1,32 @@
-FROM python:3.10-slim AS builder
-
-# Install core build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create isolated virtual environment
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Install heavy Bio-ML dependencies
-# (Includes torch, torch-geometric, rdkit, fastapi, celery, redis)
-COPY requirements_training.txt .
-RUN pip install --no-cache-dir -r requirements_training.txt
-
-
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04
 
-# Install Python runtime and RDKit geometry rendering libs
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
+    python3-pip \
+    build-essential \
+    git \
     libxrender1 \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Alias python3 to python
-RUN ln -s /usr/bin/python3.10 /usr/bin/python
-
-# Copy the pre-compiled environment from the builder stage
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Set up BioGuard working directory
 WORKDIR /app
-COPY . /app/
 
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+COPY requirements.txt .
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
-# Default command (overridden by docker-compose for workers)
-CMD ["uvicorn", "bioguard.api:app", "--host", "0.0.0.0", "--port", "8000"]
+COPY . .
+
+RUN useradd --create-home --uid 10001 bioguard \
+    && chown -R bioguard:bioguard /app
+USER bioguard
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+  CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)"]
+
+CMD ["python3", "-m", "uvicorn", "bioguard.api:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,154 +1,296 @@
-# BioGuard V3: Adaptive Graph-Metabolic DDI Prediction
+# BioGuard
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://bioguardv3.streamlit.app/)
+BioGuard is a research prototype for studying drug–drug association prediction
+from paired molecular structures. It is not a clinical decision-support system,
+does not estimate interaction incidence or causality, and must not guide
+medication decisions.
 
-**Status:** V3.0 (Strict Mode / LMDB-Backed)
+## Repository status
 
-**License:** MIT
+The repository is undergoing a scientific and engineering refactor.
 
-**Docker:** `bioguard_app:latest`
+- The bundled GAT checkpoint is a legacy artifact with unknown training
+  provenance.
+- Its architecture is verified before loading, but its operating threshold and
+  stored calibrator are disabled because their validation provenance is unknown.
+- The TWOSIDES loader now preserves drug–event–drug relations.
+- Missing TWOSIDES associations are represented as **unlabeled**, never as
+  confirmed non-interactions.
+- A binary “any reported event” dataset remains available only as an explicitly
+  derived positive-unlabeled (PU) compatibility task.
+- An event-conditioned relation decoder is not implemented yet.
+- The legacy enzyme table covers a closed drug set. Molecules absent from that
+  table currently receive zero enzyme vectors because no deployable CYP
+  predictor artifact is present.
 
-## Summary
+## Data contracts
 
-BioGuard is a production-grade inference engine designed to predict Drug-Drug Interactions (DDIs) on **New Chemical Entities (NCEs)**. Unlike academic baselines that report inflated metrics using random data splits, BioGuard is benchmarked on strict **Bemis-Murcko Scaffold-Disjoint splits** to enforce true Out-of-Distribution (OOD) generalization.
+### Primary source representation
 
-Previous versions relied on static concatenation of biological features. BioGuard V3 introduces an **Adaptive Alpha Gate ($\alpha$)**, a learnable architectural component that dynamically weights the contribution of the **Graph Neural Network (GAT)** against the **Metabolic Prior**. This allows the model to autonomously balance 3D structural physics against metabolic heuristics based on signal confidence.
+TWOSIDES is retained as positive association triples:
 
-**Key Findings:**
-1.  **Adaptive Telemetry:** The model converged to a **Mean Alpha of 0.81**, indicating a learned preference for Structural Physics (80%) over Metabolic Priors (20%) in the OOD regime.
-2.  **BioGuard GATv3:** Sacrifices precision for **High Recall (0.81)**, effectively functioning as a safety net that catches 81% of toxic interactions in strictly novel compounds.
-3.  **End-to-End NCE Support:** We replaced the static ChEMBL injection layer with an embedded **LightGBM Ensemble**, allowing immediate metabolic prediction for drugs not present in public databases.
-
-
-**Proxy Task (CYP Family Prediction): Ability of LightGBM to predict metabolic liabilities for scaffold split NCEs.**
-![](images/specificity_recall_curves_holdout(1).png)
-* API Prediction Example: Ibuprofen and Aspirin
-![](images/ExampleAspirinIbuprofen.png)
----
-
-## 1. The "SOTA" Integrity Gap
-
-Current literature (e.g., *DeepDDS*, *CASTER*) reports ROC-AUCs > 0.90. However, our reproduction analysis identifies a critical methodological flaw: **Random Splitting.**
-
-| Methodology | Data Split | ROC-AUC | Verdict                                                                                                               |
-| :--- | :--- | :--- |:----------------------------------------------------------------------------------------------------------------------|
-| **Academic Baseline (DeepDDS)** | Random / 5-Fold | **0.93** | **Structural Leakage.** The model memorizes the graph topology of drugs seen in training. Fails on NCEs.              |
-| **BioGuard (Ours)** | **Scaffold-Disjoint** | **0.73** | **Novel Generalization.** The model never sees the test scaffolds during training. Represents realistic risk scoring. |
-
-*Note: A 0.93 AUC on a random split translates to near-zero utility in a Lead Optimization pipeline where the molecule is novel.*
-
----
-
-## 2. Methodology & Architecture
-
-### A. Data Engineering (LMDB)
-To resolve memory bottlenecks and ensure data integrity:
-*   **Storage:** Switched from CSV/Parquet to **LMDB (Lightning Memory-Mapped Database)** for zero-copy tensor loading.
-*   **Featurization:** 3D Conformer generation via ETKDGv3, extracting **Gasteiger Charges** and **SASA (Solvent Accessible Surface Area)**.
-*   **Validation:** Strict multiprocessing filter that purges molecules failing physical embedding generation.
-
-### B. The Metabolic Prior (CYP-Ensemble)
-*   **Input:** 2048-bit Morgan Fingerprints.
-*   **Mechanism:** An internal ensemble of 15 LightGBM Classifiers trained to predict activity for key enzymes (CYP3A4, CYP2D6, P-gp).
-*   **Role:** Provides a dense 15-dimensional metabolic vector for *every* input, ensuring NCEs have a biological baseline before graph convolution.
-
-### C. Model B: BioGuard GATv3 (Adaptive)
-*   **Input:** Molecular Graph + Predicted CYP Vector.
-*   **Gate Mechanism:** $\text{Logits} = \sigma(\text{Gate}) \cdot f_{GAT} + (1 - \sigma(\text{Gate})) \cdot f_{Prior}$.
-*   **Loss Function:** **BioFocalLoss** ($\gamma=2.0, \alpha=0.70$) implemented to handle extreme class imbalance (3:7) and focus learning on hard negatives.
-
----
-
-## 3. Benchmarks (Scaffold-Disjoint Test Set)
-
-Evaluation performed on a held-out test set of **entirely unseen molecular scaffolds**.
-
-| Model | Architecture | ROC-AUC  | PR-AUC   | Recall (Sensitivity) | Role                                                                                    |
-| :--- | :--- |:---------|:---------| :--- |:----------------------------------------------------------------------------------------|
-| **BioGuard V3** | Adaptive GAT + Prior | **0.73** | **0.45** | **0.81** | **High-Sensitivity Safety Net.**                                                        |
-|**LightGBM**|Gradient-Boosted Decision Tree|0.71|0.44|0.68|*Represents Limit of ECFP4 for generalizing to NCEs.*
-| **BioGuard V2** | Static Concatenation | 0.71     | 0.43     | 0.70 | *No Ensemble Architecture, Unable to infer metabolic liability for NCEs not in ChEMBL.* |
-| *Naive GAT* | Graph Neural Net | 0.64     | 0.37     | 0.27 | *Failed Control (No Biological Context).*                                               |
-
-**Analysis:**
-*   **Recall Improvement:** V3 improves recall by **13%** over LightGBM Baseline (0.68 -> 0.81) via Focal Loss Implementation.
-*   **Specificty Trade-off:** Precision remains moderate (0.42), yielding ~1.3 false positives per true positive. This is an intentional design choice to prioritize safety (Recall) over specificity.
-
----
-
-## 4. Reproducibility
-
-### Setup
-BioGuard is fully dockerized for reproducibility.
-
-```bash
-# 1. Clone
-git clone https://github.com/LM1290/BioGuard.git
-cd BioGuard
-
-# 2. Build Environment
-docker build -t bioguard_app .
-
-#3. Serve API Endpoint
-docker run -p 8000:8000 bioguard_app
+```text
+(drug_a, event_id, drug_b)
 ```
 
-### Data Pipeline & LMDB Generation
-To reproduce the 3D physics generation and LMDB caching:
-```bash
-#1. Generate Enzyme Dataset via ChEMBL
-python -m tools.map_human_cyps
-python -m tools.fetch_full_enzyme_profile
+Exact duplicate triples are counted, while different event identifiers for the
+same drug pair remain separate records. Standardization, exclusions, source
+counts, and record hashes are captured in a manifest.
 
-#2. Patch SMILES to Dataset
-python -m tools.patch_smiles
+```python
+from bioguard.data_loader import load_twosides_relations
+
+bundle = load_twosides_relations()
+relations = bundle.records
+manifest = bundle.manifest
 ```
+
+These records are pharmacovigilance associations. They are not proof of
+causality, severity, incidence, or a patient-specific outcome.
+
+### Binary positive-unlabeled derivative
+
+The current GAT can only emit one pair-level score. For compatibility
+experiments, event triples can therefore be collapsed into “any reported event”
+positives. Sampled missing pairs are explicitly annotated as unlabeled:
+
+```python
+from bioguard.data_loader import load_twosides_binary_pu
+
+bundle = load_twosides_binary_pu(
+    split_method="scaffold_disjoint",
+    train_unlabeled_ratio=1.0,
+    val_unlabeled_ratio=1.0,
+    test_unlabeled_ratio=1.0,
+)
+```
+
+Important columns include:
+
+| Column | Meaning |
+|---|---|
+| `event_ids` | All retained TWOSIDES event identifiers for a positive pair |
+| `observation` | `positive` or `unlabeled` |
+| `target` | Optimization indicator; zero means unlabeled, not negative |
+| `negative_evidence` | Explicit evidence status for the sampled pair |
+| `split` | Auditable split assignment |
+
+The binary training path uses non-negative PU risk. It requires a documented
+class-prior assumption; the software deliberately supplies no universal
+default.
+
+## Split regimes
+
+Three split contracts are implemented:
+
+| Split | Contract |
+|---|---|
+| `pair_random` | Exact drug pairs are disjoint; individual drugs may overlap |
+| `drug_disjoint` | Both drugs belong to disjoint train/validation/test drug pools |
+| `scaffold_disjoint` | Drug pools are grouped by stereochemistry-aware Murcko scaffold; both drugs must belong to the same partition |
+
+For drug- and scaffold-disjoint splits, cross-partition relations are recorded
+as `excluded_cross_partition` instead of being silently reassigned. Manifests
+report exclusions and overlap counts.
+
+## Model
+
+The legacy `BioGuardGAT` has two swap-invariant branches:
+
+1. A shared GATv2 molecular encoder using 46-dimensional atom features and
+   8-dimensional edge features.
+2. A learned head over 60-dimensional legacy enzyme-table vectors.
+
+A sigmoid gate combines the two logits. The gate value is telemetry, not a
+causal explanation or calibrated pathway attribution.
+
+## Setup
+
 ```bash
-# 1. Download and Clean TWOSIDES (Scaffold Split)
-python -c "from bioguard.data_loader import load_twosides_data; load_twosides_data(split_method='cold_drug')"
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-# 2. Train the internal CYP Predictor (LightGBM Ensemble)
-python -m bioguard.train_cyp_predictor
+The dependency file is not yet a complete lockfile. Reproducible release images
+remain a refactor milestone.
 
-# 3. Build LMDB Cache (High CPU Usage - Multiprocessed 3D Embedding)
+## Data preparation
+
+Build the event-preserving relation cache:
+
+```bash
+python -c "from bioguard.data_loader import load_twosides_relations; load_twosides_relations()"
+```
+
+Generate the LMDB molecular-graph cache:
+
+```bash
 python -m bioguard.build_lmdb
 ```
 
-### Inference & Training
-Reproduce the benchmarks reported above:
+Molecules that fail graph featurization are written to
+`data/lmdb_featurization_report.json`. Source labels are never overwritten.
+
+Validate and export the split/leakage report:
 
 ```bash
-# 1. Train BioGuard GATv3 (Adaptive Mode)
-python -m bioguard.main train --split cold_drug --epochs 50
-
-# 2. Evaluate on Holdout
-python -m bioguard.main eval
-
-# 3. Run Production API
-python -m bioguard.main serve
+python validate_data.py --split scaffold_disjoint
 ```
 
----
+## Training
 
-## 5. Model Audit & Interpretability
+Training requires an explicit PU class-prior assumption:
 
-We include an audit suite (`model_audit.py`) to verify biological grounding and prevent bit-collision artifacts.
+```bash
+python -m bioguard.main train \
+  --split scaffold_disjoint \
+  --class-prior <documented-value> \
+  --unlabeled-ratio 1.0 \
+  --epochs 50
+```
 
-*   **Consensus Decoding:** Maps high-activation bits in the Morgan Fingerprint back to visual pharmacophores to ensure the CYP Predictor is learning chemical motifs.
-*   **Specificity-Recall Curves:** Generated on strict holdout sets to verify the clinical utility range.
+The class prior must come from a prespecified analysis or sensitivity range; it
+must not be selected on the final test set. New checkpoints embed their data and
+split manifests and are checksummed with their feature artifacts.
 
----
+## Evaluation and baselines
 
-## 6. Resolved Technical Debt
+```bash
+python -m bioguard.main eval
+python -m bioguard.main baselines \
+  --split scaffold_disjoint \
+  --unlabeled-ratio 1.0
+```
 
-*   **GPU Utilization:** Previous versions suffered from IO bottlenecks. The implementation of `BioGuardDataset` backed by LMDB now allows for full GPU saturation during training.
-*   **Memory Management:** Dataset is now memory-mapped; RAM usage is decoupled from dataset size, enabling scaling to millions of pairs.
-*   **Strict Dimension Guard:** The API now enforces strict vector dimension checks between the Enzyme Manager and the GNN to prevent silent tensor broadcasting errors.
+Reported PU ROC-AUC and PU PR-AUC distinguish observed associations from sampled
+unlabeled pairs. They are not clinical sensitivity, specificity, precision, or
+probability calibration metrics.
 
----
+## Reproducible four-model benchmark
 
-## 7. Production Features (Implemented)
+The new benchmark compares ECFP logistic regression, graph-only GAT,
+enzyme-only, and fused GAT models on **identical effective train, validation,
+and test cohorts**. It trains neural models using balanced binary
+cross-entropy on the *observation indicator*: reported association versus
+sampled unlabeled pair. It does not assert that missing associations are true
+negatives or that the resulting score estimates latent interaction risk.
+The separate nnPU training command remains experimental: its class prior and
+sampling assumptions require scientific justification.
 
-*   **NCE Generalization:** The `EnzymeManager` now defaults to the trained `CYPPredictor` when a standard InChIKey lookup fails, enabling support for novel molecules.
-*   **Class Imbalance:** Implemented `BioFocalLoss` to aggressively penalize easy negatives, stabilizing training on the 10:1 negative-to-positive ratio in the cleaning pipeline.
-*   **API Telemetry:** The `/predict` endpoint now returns `alpha_telemetry` and `risk_level` alongside raw probabilities to provide transparency into the model's decision-making logic (Structure vs. Prior).
+```bash
+python -m bioguard.main benchmark \
+  --output data/benchmark_runs/scaffold_001 \
+  --split scaffold_disjoint \
+  --split-seed 42 \
+  --seeds 17 42 73 \
+  --epochs 20
+```
+
+The default source is the versioned event-preserving TWOSIDES loader. An
+optional `--source-csv` accepts raw columns `Drug1_ID`, `Drug1`, `Y`,
+`Drug2_ID`, and `Drug2`; it passes through the same relation preparation and
+split rules. A local fixture run checks execution only and cannot establish
+predictive quality. Do not substitute the old binary Parquets for the raw
+relation source.
+
+Runs use CPU with two Torch threads by default. Existing output directories
+are refused. Each run contains:
+
+- The original candidate cohort, common graph-eligible cohort, excluded pairs,
+  per-split graph coverage, and enzyme-table coverage counts.
+- Source/data/split/feature manifests, training configuration, actual Python
+  package versions, and snapshots with hashes of the implementation files.
+- Separate seed/model directories containing weights or the fitted baseline,
+  training histories for neural models, and held-out prediction rows.
+- Per-model ranking metrics, seed means/spreads, and a completion status.
+
+Validation AP selects regularization and neural checkpoints. Training seeds
+change model initialization/batches while the split seed stays fixed. Seed
+spread is not a confidence interval. The enzyme ablation currently measures
+the legacy table with zero fallback; it does not yet implement per-endpoint
+missingness masks or a validated learned CYP predictor. A benchmark refuses
+an undeclared installed CYP predictor rather than silently mixing features.
+
+The benchmark creates its own graph cache and does not replace the bundled
+model. Its checkpoints declare the `observed_association_ranking` task;
+the older nnPU evaluator intentionally does not accept them. Inspect their
+run-local predictions and results instead. The API can load an individual
+benchmark checkpoint using `BG_ARTIFACT_DIR`, but deployment requires separate
+model selection and validation.
+
+## Molecular and cohort contracts
+
+New graphs use `charge_parent_isomeric_v1`, the same normalization used by the
+relation loader: RDKit charge parent, canonical isomeric SMILES, preservation
+of stereochemistry, and no added tautomer canonicalization. Inputs are bounded
+before conformer generation. The API passes the checkpoint's declared policy
+to the worker and returns the processed structures and per-drug enzyme
+coverage. A legacy checkpoint without a policy explicitly uses `legacy_raw_v1`
+to preserve its prior behavior; it does not gain validated normalization by
+being loaded with newer software.
+
+New model bundles and graph caches record the featurizer/normalizer source
+hashes and RDKit/Torch/PyG versions. Incompatible caches or bundles fail closed.
+The standard cache is now `data/lmdb_cache_v1`; `BG_GRAPH_CACHE` can select
+another directory. Build a fresh cache when its contract changes. Existing
+legacy cache contents are not overwritten or automatically migrated.
+
+Standalone `baselines` defaults to `--cohort graph`, requiring the versioned
+graph cache and using its eligible pairs. `--cohort all` explicitly evaluates
+all pairs. Schema-3 comparisons reject differences in **any** effective
+train/validation/test cohort, including changed labels or structures, even
+when the upstream source hash is identical. Older results must be regenerated.
+
+## API and dashboard
+
+```bash
+docker compose up --build
+```
+
+or:
+
+```bash
+python -m bioguard.main serve
+streamlit run dashboard.py
+```
+
+The API exposes:
+
+- `/health` for process liveness
+- `/ready` for model, feature-schema, and artifact readiness
+- `/predict` for research-use pair scoring
+
+The current bundled checkpoint returns an unvalidated `screening_score` and a
+null `threshold_decision`. It does not return a clinically validated high/low
+classification.
+
+## Tests
+
+```bash
+python -m unittest discover -v
+ruff check .
+```
+
+The scientific contract tests cover event preservation, duplicate handling,
+input-order determinism, positive-versus-unlabeled semantics, pair leakage,
+drug-disjoint splits, scaffold-disjoint splits, artifact compatibility, and
+drug-order invariance.
+
+## Major remaining research work
+
+- Implement an event-conditioned multi-relational decoder.
+- Add relation ontology/version mapping and directionality where supported.
+- Benchmark multiple PU class-prior assumptions and ranking objectives.
+- Add temporal and external validation sources with overlap audits.
+- Replace the closed-world enzyme table with experimentally defined auxiliary
+  tasks and a versioned inference artifact.
+- Add uncertainty, applicability-domain checks, abstention, confidence
+  intervals, repeated seeds, and locked confirmatory splits.
+- Publish model cards, data sheets, prediction files, and complete environment
+  locks for every released result.
+
+## License
+
+Repository code is MIT licensed. Dataset and derived-artifact redistribution
+rights must be evaluated separately for each upstream source.

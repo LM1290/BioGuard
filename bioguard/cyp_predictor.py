@@ -40,7 +40,11 @@ class CYPPredictor:
         target_feature_list: The 60-dim list of feature names from the CSV.
         """
         if not self.models:
-            if target_feature_list: return np.zeros(len(target_feature_list), dtype=np.float32)
+            if target_feature_list:
+                return np.zeros(
+                    len(target_feature_list),
+                    dtype=np.float32,
+                )
             raise ValueError("No models loaded.")
 
         features = self._get_features(smiles).reshape(1, -1)

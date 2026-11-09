@@ -6,8 +6,11 @@ from bioguard.config import NODE_DIM, EDGE_DIM
 
 
 class BioGuardGAT(nn.Module):
-    def __init__(self, node_dim=NODE_DIM, edge_dim=EDGE_DIM, embedding_dim=128, heads=4, enzyme_dim=15):
+    def __init__(self, node_dim=NODE_DIM, edge_dim=EDGE_DIM, embedding_dim=128, heads=4, enzyme_dim=15, branch="fused"):
         super().__init__()
+        if branch not in ("graph", "enzyme", "fused"):
+            raise ValueError(f"Unsupported model branch: {branch}")
+        self.branch = branch
 
         # --- 1. The Pure Graph Pathway ---
         self.atom_encoder = nn.Sequential(
@@ -50,8 +53,6 @@ class BioGuardGAT(nn.Module):
         with torch.no_grad():
             self.alpha_gate[2].bias.fill_(0.0)
 
-        print(f"[BioGuardGAT] Adaptive Ensemble Gate Enabled. Enzyme Dim: {enzyme_dim}")
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -67,6 +68,10 @@ class BioGuardGAT(nn.Module):
         return torch.cat([x_mean, x_max], dim=1)
 
     def forward(self, data_a, data_b, force_graph_only=False):
+        if self.branch == "enzyme" and not force_graph_only:
+            a, b = data_a.enzyme_a.float(), data_b.enzyme_b.float()
+            logits = self.prior_head(torch.cat([a + b, torch.abs(a - b), a * b], dim=1))
+            return logits, torch.zeros_like(logits)
         # 1. Graph Embeddings
         vec_a = self.forward_one_arm(data_a.x, data_a.edge_index, data_a.edge_attr, data_a.batch)
         vec_b = self.forward_one_arm(data_b.x, data_b.edge_index, data_b.edge_attr, data_b.batch)
@@ -86,7 +91,7 @@ class BioGuardGAT(nn.Module):
         prior_logits = self.prior_head(enz_combined)
 
         # 4. The Ensemble Gate
-        if force_graph_only:
+        if force_graph_only or self.branch == "graph":
             alpha = torch.ones_like(gat_logits)
             # Detach prior logits so no gradients flow back to the LightGBM pathway during warmup
             prior_logits = prior_logits.detach()

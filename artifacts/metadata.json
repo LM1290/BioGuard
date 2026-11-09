@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "model_class": "BioGuardGAT",
+  "checkpoint": "model.pt",
+  "checkpoint_sha256": "10970783de00f6edff71b924f7e71f15d591324de140472b84999cb7dcd0f60f",
+  "node_dim": 46,
+  "edge_dim": 8,
+  "enzyme_dim": 60,
+  "embedding_dim": 128,
+  "heads": 4,
+  "threshold": 0.5,
+  "threshold_validated": false,
+  "calibrator": "calibrator.joblib",
+  "calibrator_sha256": "0b1a9a3f0eb69d4645e31295f892c0ae9fb5ccefa297ec42b2179a33a31ced20",
+  "calibrator_enabled": false,
+  "scientific_task": "legacy_binary_any_recorded_association_unknown_sampling",
+  "training_provenance_status": "unknown_legacy",
+  "calibration_provenance_status": "unknown_legacy",
+  "enzyme_fallback_status": "zero_vector_for_unseen_smiles",
+  "supporting_files": [
+    {
+      "role": "enzyme_features",
+      "path": "data/enzyme_features_full.csv",
+      "sha256": "08e8095ff4f19c7a4683f00c8bde331ff9299e8c806e21997af8784039507581"
+    }
+  ],
+  "split_type": null,
+  "legacy_unverified": true
+}

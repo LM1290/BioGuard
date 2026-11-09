@@ -19,4 +19,4 @@ artifacts/*.pdf
 !artifacts/
 !artifacts/*.pt
 !artifacts/*.joblib
-
+!artifacts/metadata.json

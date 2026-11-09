@@ -1,252 +1,161 @@
-"""
-Baseline models for DDI prediction.
-UPDATED: v2.0 (Optimized & Split-Aware)
+"""Reproducible structure baselines for the binary PU compatibility task."""
 
-Baselines:
-1. Tanimoto Similarity (structure-only)
-2. Logistic Regression (structure features only)
-3. Random Forest (structure features only)
+from __future__ import annotations
 
-Updates:
-- Implemented fingerprint caching (Speedup: ~50x)
-- Added support for Cold/Scaffold splits to match GAT evaluation
-"""
+import json
+from pathlib import Path
 
 import numpy as np
-import os
-import json
-import argparse
-from tqdm import tqdm
-
-from sklearn.linear_model import LogisticRegression
+from rdkit import Chem
+from rdkit.Chem import rdFingerprintGenerator
+from scipy import sparse
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    accuracy_score,
-    f1_score
-)
-from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem
-from rdkit.Chem.MolStandardize import rdMolStandardize
-from rdkit import RDLogger
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
 
-# Import splits from train.py to ensure identical data processing
-from .data_loader import load_twosides_data
-from .featurizer import BioFeaturizer
+from .config import ARTIFACT_DIR, RANDOM_SEED, LMDB_DIR
+from .cohorts import require_binary_splits
+from .graph_cache import filter_cached_pairs
+from .data_loader import load_twosides_binary_pu
 
-RDLogger.DisableLog('rdApp.*')
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARTIFACT_DIR = os.path.join(BASE_DIR, 'artifacts')
-BASELINE_RESULTS = os.path.join(ARTIFACT_DIR, 'baseline_results.json')
+BASELINE_RESULTS = Path(ARTIFACT_DIR) / "baseline_results.json"
+FINGERPRINT_BITS = 1024
 
 
-class FingerprintCache:
-    """
-    Singleton-style cache to avoid re-computing fingerprints
-    for the same drug 10,000 times.
-    """
+class SymmetricFingerprintFeaturizer:
+    """Sparse ECFP pair operators invariant to drug order."""
 
-    def __init__(self):
-        self.cache = {}
-        self.te = rdMolStandardize.TautomerEnumerator()
-        self.te.SetMaxTautomers(20)
-        self.te.SetMaxTransforms(20)
+    def __init__(self, n_bits: int = FINGERPRINT_BITS):
+        self.generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=2,
+            fpSize=n_bits,
+            includeChirality=True,
+        )
+        self.n_bits = n_bits
+        self.cache: dict[str, np.ndarray] = {}
 
-    def _clean_mol(self, mol):
-        try:
-            mol = rdMolStandardize.ChargeParent(mol)
-            mol = self.te.Canonicalize(mol)
-            return mol
-        except:
-            return mol
+    def fingerprint(self, smiles: str) -> np.ndarray:
+        if smiles not in self.cache:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                raise ValueError(f"Invalid standardized SMILES: {smiles}")
+            self.cache[smiles] = np.asarray(
+                self.generator.GetFingerprintAsNumPy(mol),
+                dtype=np.uint8,
+            )
+        return self.cache[smiles]
 
-    def get_fp(self, smiles):
-        if smiles in self.cache:
-            return self.cache[smiles]
-
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            self.cache[smiles] = None
-            return None
-
-        # Expensive standardization happens ONCE per drug
-        mol = self._clean_mol(mol)
-
-        # 2048 bits to match BioFeaturizer
-        fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
-        self.cache[smiles] = fp
-        return fp
-
-    def precompute(self, unique_smiles_list):
-        print(f"Pre-computing fingerprints for {len(unique_smiles_list)} unique drugs...")
-        for s in tqdm(unique_smiles_list):
-            self.get_fp(s)
+    def transform(self, frame) -> sparse.csr_matrix:
+        rows = []
+        for row in frame.itertuples(index=False):
+            fp_a = self.fingerprint(row.smiles_a)
+            fp_b = self.fingerprint(row.smiles_b)
+            features = np.concatenate(
+                [
+                    fp_a + fp_b,
+                    np.bitwise_xor(fp_a, fp_b),
+                    np.bitwise_and(fp_a, fp_b),
+                ]
+            )
+            rows.append(sparse.csr_matrix(features.reshape(1, -1)))
+        if not rows:
+            return sparse.csr_matrix((0, self.n_bits * 3))
+        return sparse.vstack(rows, format="csr")
 
 
-def evaluate_tanimoto_baseline(test_df, cache):
-    """
-    Baseline 1: Tanimoto Similarity
-    Uses cached fingerprints for O(1) lookup.
-    """
-    print("\n" + "=" * 60)
-    print("BASELINE 1: TANIMOTO SIMILARITY")
-    print("=" * 60)
-
-    similarities = []
-    valid_labels = []
-
-    # This loop is now extremely fast
-    for _, row in tqdm(test_df.iterrows(), total=len(test_df), desc="Calculating Similarities"):
-        fp_a = cache.get_fp(row['smiles_a'])
-        fp_b = cache.get_fp(row['smiles_b'])
-
-        if fp_a is not None and fp_b is not None:
-            sim = DataStructs.TanimotoSimilarity(fp_a, fp_b)
-            similarities.append(sim)
-            valid_labels.append(row['label'])
-
-    similarities = np.array(similarities)
-    valid_labels = np.array(valid_labels)
-
-    print(f"Valid pairs: {len(similarities)}/{len(test_df)}")
-
-    roc_auc = roc_auc_score(valid_labels, similarities)
-    pr_auc = average_precision_score(valid_labels, similarities)
-
-    # Find optimal threshold
-    thresholds = np.linspace(0, 1, 100)
-    best_f1 = 0
-    best_threshold = 0.5
-
-    for thresh in thresholds:
-        preds = (similarities >= thresh).astype(int)
-        f1 = f1_score(valid_labels, preds)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_threshold = thresh
-
-    preds = (similarities >= best_threshold).astype(int)
-
-    results = {
-        "name": "Tanimoto Similarity",
-        "description": "Structure-only baseline",
-        "roc_auc": float(roc_auc),
-        "pr_auc": float(pr_auc),
-        "threshold": float(best_threshold),
-        "f1": float(best_f1),
-        "accuracy": float(accuracy_score(valid_labels, preds))
+def _ranking_metrics(targets, scores):
+    return {
+        "pu_roc_auc": float(roc_auc_score(targets, scores)),
+        "pu_pr_auc": float(average_precision_score(targets, scores)),
     }
-
-    print(f"  ROC-AUC   : {roc_auc:.4f}")
-    print(f"  PR-AUC    : {pr_auc:.4f}")
-    print(f"  Best F1   : {best_f1:.4f}")
-
-    return results
-
-
-def prepare_features(df):
-    """
-    Prepare flat feature matrix for ML models.
-    """
-    print("Preparing ML features...")
-    featurizer = BioFeaturizer()
-    X, y = [], []
-
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Featurizing"):
-        try:
-            vec = featurizer.featurize_pair(row['smiles_a'], row['smiles_b'])
-            X.append(vec)
-            y.append(row['label'])
-        except:
-            continue
-
-    return np.array(X), np.array(y)
-
-
-def evaluate_ml_baselines(train_df, test_df):
-    """
-    Runs Logistic Regression and Random Forest.
-    """
-    X_train, y_train = prepare_features(train_df)
-    X_test, y_test = prepare_features(test_df)
-
-    results = {}
-
-    # --- Logistic Regression ---
-    print("\n[Baseline 2] Logistic Regression...")
-    lr = LogisticRegression(max_iter=1000, class_weight='balanced', n_jobs=1)
-    lr.fit(X_train, y_train)
-    probs = lr.predict_proba(X_test)[:, 1]
-
-    results['logistic_regression'] = {
-        "name": "Logistic Regression",
-        "roc_auc": float(roc_auc_score(y_test, probs)),
-        "pr_auc": float(average_precision_score(y_test, probs)),
-        "f1": float(f1_score(y_test, (probs >= 0.5).astype(int)))
-    }
-    print(f"  ROC-AUC: {results['logistic_regression']['roc_auc']:.4f}")
-
-    # --- Random Forest ---
-    print("\n[Baseline 3] Random Forest...")
-    rf = RandomForestClassifier(n_estimators=50, max_depth=15, n_jobs=-1)
-    rf.fit(X_train, y_train)
-    probs = rf.predict_proba(X_test)[:, 1]
-
-    results['random_forest'] = {
-        "name": "Random Forest",
-        "roc_auc": float(roc_auc_score(y_test, probs)),
-        "pr_auc": float(average_precision_score(y_test, probs)),
-        "f1": float(f1_score(y_test, (probs >= 0.5).astype(int)))
-    }
-    print(f"  ROC-AUC: {results['random_forest']['roc_auc']:.4f}")
-
-    return results
 
 
 def run_baselines(args):
-    print(f"--- BioGuard Baselines ({args.split.upper()} Split) ---")
+    """Fit baselines on exactly the same PU records and split manifest."""
+    bundle = load_twosides_binary_pu(
+        split_method=args.split,
+        train_unlabeled_ratio=args.unlabeled_ratio,
+        val_unlabeled_ratio=args.unlabeled_ratio,
+        test_unlabeled_ratio=args.unlabeled_ratio,
+        random_seed=RANDOM_SEED,
+    )
+    records = bundle.records
+    if getattr(args, "cohort", "graph") == "graph":
+        records = filter_cached_pairs(records, LMDB_DIR)
+    effective_cohorts = require_binary_splits(records)
+    train = records[records["split"] == "train"]
+    val = records[records["split"] == "val"]
+    test = records[records["split"] == "test"]
 
-    # 1. Load & Split Data
-    print("Loading data for baselines...")
-    df = load_twosides_data()
+    featurizer = SymmetricFingerprintFeaturizer()
+    x_train = featurizer.transform(train)
+    x_val = featurizer.transform(val)
+    x_test = featurizer.transform(test)
+    y_train = train["target"].to_numpy()
+    y_val = val["target"].to_numpy()
+    y_test = test["target"].to_numpy()
 
-    train_df = df[df['split'] == 'train']
-    test_df = df[df['split'] == 'test']
+    candidates = []
+    for c_value in (0.01, 0.1, 1.0, 10.0):
+        model = LogisticRegression(
+            C=c_value,
+            max_iter=2000,
+            random_state=RANDOM_SEED,
+        )
+        model.fit(x_train, y_train)
+        val_scores = model.predict_proba(x_val)[:, 1]
+        candidates.append(
+            (
+                average_precision_score(y_val, val_scores),
+                c_value,
+                model,
+            )
+        )
+    _, selected_c, logistic = max(candidates, key=lambda item: item[0])
+    results = {
+        "schema_version": 3,
+        "task": "binary_any_reported_event_positive_unlabeled",
+        "evaluation_semantics": (
+            "Observed associations versus sampled unlabeled pairs; "
+            "unlabeled pairs are not confirmed negatives."
+        ),
+        "split": args.split,
+        "data_records_sha256": bundle.manifest["records_sha256"],
+        "effective_cohorts": effective_cohorts,
+        "coverage": len(records) / len(bundle.records),
+        "models": {
+            "logistic_regression_ecfp": {
+                "name": "Logistic Regression on symmetric ECFP operators",
+                "selected_c": selected_c,
+                **_ranking_metrics(
+                    y_test,
+                    logistic.predict_proba(x_test)[:, 1],
+                ),
+            }
+        },
+    }
 
-    print(f"Baseline Data: Train={len(train_df)}, Test={len(test_df)}")
-
-    # 2. Pre-compute Cache for Tanimoto
-    # Gather all unique SMILES from the TEST set (we don't need train/val for Tanimoto)
-    unique_test_smiles = list(set(test_df['smiles_a']) | set(test_df['smiles_b']))
-    cache = FingerprintCache()
-    cache.precompute(unique_test_smiles)
-
-    # 3. Run Evaluations
-    results = {}
-
-    # Tanimoto
-    results['tanimoto'] = evaluate_tanimoto_baseline(test_df, cache)
-
-    # ML Models (LR/RF)
-    # Only run if requested, as they are slower
     if not args.quick:
-        ml_results = evaluate_ml_baselines(train_df, test_df)
-        results.update(ml_results)
+        forest = RandomForestClassifier(
+            n_estimators=300,
+            max_depth=20,
+            min_samples_leaf=2,
+            n_jobs=-1,
+            random_state=RANDOM_SEED,
+        )
+        forest.fit(x_train, y_train)
+        results["models"]["random_forest_ecfp"] = {
+            "name": "Random Forest on symmetric ECFP operators",
+            **_ranking_metrics(
+                y_test,
+                forest.predict_proba(x_test)[:, 1],
+            ),
+        }
 
-    # 4. Save
-    os.makedirs(ARTIFACT_DIR, exist_ok=True)
-    with open(BASELINE_RESULTS, 'w') as f:
-        json.dump(results, f, indent=2)
-
-    print(f"\n[OK] Results saved to {BASELINE_RESULTS}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--split', type=str, default='cold', choices=['random', 'cold', 'scaffold'])
-    parser.add_argument('--quick', action='store_true', help="Skip ML training, run only Tanimoto")
-    args = parser.parse_args()
-
-    run_baselines(args)
+    BASELINE_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+    BASELINE_RESULTS.write_text(
+        json.dumps(results, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Baseline results written to {BASELINE_RESULTS}")
+    return results
